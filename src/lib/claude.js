@@ -13,17 +13,22 @@ REGLAS ABSOLUTAS:
 7. Estilo técnico-jurídico preciso, sin adornos
 8. Cuando la IA declara inconstitucionalidad del inc. 2 art. 12 LRT: fundamento completo de 6-8 párrafos`;
 
-async function callClaude(apiKey, system, messages, maxTokens = 2000) {
+async function callClaude(apiKey, system, messages, maxTokens = 4000) {
   const res = await fetch('/api/generate', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Api-Key': apiKey },
     body: JSON.stringify({ system, messages, max_tokens: maxTokens })
   })
-  if (!res.ok) {
-    const err = await res.json()
-    throw new Error(err.error || `Error HTTP ${res.status}`)
+  const responseText = await res.text()
+  let data
+  try {
+    data = JSON.parse(responseText)
+  } catch {
+    throw new Error(`Respuesta inválida del servidor (${res.status}): ${responseText.slice(0, 200)}`)
   }
-  const data = await res.json()
+  if (!res.ok) {
+    throw new Error(data.error?.message || data.error || `Error HTTP ${res.status}`)
+  }
   if (data.error) throw new Error(data.error.message || JSON.stringify(data.error))
   if (!data.content?.[0]?.text) throw new Error('Respuesta vacía de la API')
   return data.content[0].text
