@@ -13,10 +13,10 @@
     "docx": "^8.5.0",
     "file-saver": "^2.0.5",
     "lucide-react": "^0.383.0",
+    "mammoth": "^1.8.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "react-router-dom": "^6.21.0",
-    "mammoth": "^1.8.0",
+    "react-router-dom": "^6.21.0"
   },
   "devDependencies": {
     "@types/react": "^18.2.0",
