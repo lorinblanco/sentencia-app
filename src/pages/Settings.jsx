@@ -11,17 +11,17 @@ export default function Settings({ profile, session, onUpdate }) {
   const [showKey, setShowKey] = useState(false)
 
   async function save() {
-    setSaving(true); setSaved(false); setError('')
-    try {
-      if (!apiKey.startsWith('sk-ant-')) throw new Error('La API key debe comenzar con sk-ant-')
-      await updateApiKey(session.user.id, apiKey)
-      const { data } = await supabase.from('profiles').select('*').eq('id', session.user.id).single()
-      onUpdate(data)
-      setSaved(true)
-    } catch (e) { setError(e.message) }
-    setSaving(false)
-  }
-
+  setSaving(true); setSaved(false); setError('')
+  try {
+    if (!apiKey.startsWith('sk-ant-')) throw new Error('La API key debe comenzar con sk-ant-')
+    await updateApiKey(session.user.id, apiKey)
+    const { data, error } = await supabase.from('profiles').select('*').eq('id', session.user.id).single()
+    if (error) throw new Error(error.message)
+    onUpdate(data)
+    setSaved(true)
+  } catch (e) { setError(e.message) }
+  setSaving(false)
+}
   return (
     <div className="min-h-screen bg-slate-50">
       <header className="bg-white border-b border-slate-200 px-6 py-4">
