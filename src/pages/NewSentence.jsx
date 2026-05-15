@@ -4,23 +4,34 @@ import { extractExpedienteData, generateSentenceSection, getPrompts } from '../l
 import { saveSentence } from '../lib/supabase'
 import { buildWordDocument } from '../lib/word'
 
-const TIPO_ACCIONES = [
-  'Acción especial – Ley 24.557',
-  'Revisión resolución CM – Art. 2 inc. J ley 15.057',
-  'Apelación resolución administrativa – Ley 27.348',
-  'Enfermedad profesional – Acción especial',
+// Weiss SIEMPRE vota última y SIEMPRE tiene la salvedad art. 7 ley 23.928
+// Solo se elige quién vota primero entre Zacarías y Stolarczyk
+// El orden es el mismo para PRIMERA y SEGUNDA cuestión
+
+const OPCIONES_VOTO = [
+  {
+    id: 'zacarias_primero',
+    label: 'Zacarías → Stolarczyk → Weiss',
+    juez1: { nombre: 'ZACARÍAS', nombreCompleto: 'LA SEÑORA JUEZA DOCTORA ANDREA MARCELA ZACARÍAS', corto: 'Dra. Zacarías', genero: 'f' },
+    juez2: { nombre: 'STOLARCZYK', nombreCompleto: 'EL SEÑOR JUEZ DOCTOR MARIO DANIEL STOLARCZYK', corto: 'Dr. Stolarczyk', genero: 'm' },
+  },
+  {
+    id: 'stolarczyk_primero',
+    label: 'Stolarczyk → Zacarías → Weiss',
+    juez1: { nombre: 'STOLARCZYK', nombreCompleto: 'EL SEÑOR JUEZ DOCTOR MARIO DANIEL STOLARCZYK', corto: 'Dr. Stolarczyk', genero: 'm' },
+    juez2: { nombre: 'ZACARÍAS', nombreCompleto: 'LA SEÑORA JUEZA DOCTORA ANDREA MARCELA ZACARÍAS', corto: 'Dra. Zacarías', genero: 'f' },
+  },
 ]
 
-const JUECES = [
-  'LA SEÑORA JUEZA DOCTORA ZACARÍAS',
-  'EL SEÑOR JUEZ DOCTOR STOLARCZYK',
-  'LA SEÑORA JUEZA DOCTORA WEISS',
-]
-
-const JUECES_LABEL = ['Dra. Zacarías', 'Dr. Stolarczyk', 'Dra. Weiss']
+const WEISS = {
+  nombre: 'WEISS',
+  nombreCompleto: 'LA SEÑORA JUEZA DOCTORA MARÍA ALEJANDRA WEISS',
+  corto: 'Dra. Weiss',
+  nombreCivil: 'María Alejandra Weiss',
+}
 
 const STEPS = [
-  { id: 'upload', label: 'Expediente', icon: '📂' },
+  { id: 'upload', label: 'Archivos', icon: '📂' },
   { id: 'config', label: 'Configuración', icon: '⚙️' },
   { id: 'generate', label: 'Generación', icon: '✍️' },
   { id: 'result', label: 'Resultado', icon: '📄' },
@@ -29,7 +40,7 @@ const STEPS = [
 const GEN_STEPS = [
   'Extrayendo datos del expediente...',
   'Buscando RIPTE actual...',
-  'Redactando antecedentes...',
+  'Redactando antecedentes y hechos...',
   'Redactando resolución y pericia médica...',
   'Redactando IBM y cierre Primera Cuestión...',
   'Redactando Segunda Cuestión...',
@@ -37,20 +48,23 @@ const GEN_STEPS = [
   'Generando archivo Word...',
 ]
 
+const FILE_TYPES = {
+  'application/pdf': { icon: '📄', label: 'PDF' },
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': { icon: '📊', label: 'Excel' },
+  'application/vnd.ms-excel': { icon: '📊', label: 'Excel' },
+}
+
 export default function NewSentence({ profile, session }) {
   const navigate = useNavigate()
   const [step, setStep] = useState(0)
 
-  // Step 0: Upload
-  const [file, setFile] = useState(null)
-  const [fileB64, setFileB64] = useState('')
+  // Step 0: Archivos múltiples
+  const [files, setFiles] = useState([]) // [{ file, b64, tipo }]
   const [drag, setDrag] = useState(false)
   const fileRef = useRef()
 
   // Step 1: Config
-  const [tipoAccion, setTipoAccion] = useState(TIPO_ACCIONES[0])
-  const [votoPrimero1, setVotoPrimero1] = useState(0)  // Primera cuestión
-  const [votoPrimero2, setVotoPrimero2] = useState(0)  // Segunda cuestión
+  const [opcionVoto, setOpcionVoto] = useState(0) // índice en OPCIONES_VOTO
   const [ripteManual, setRipteManual] = useState('')
   const [ripteAuto, setRipteAuto] = useState({ valor: '', fecha: '', loading: false })
   const [honorarios, setHonorarios] = useState({
@@ -68,7 +82,6 @@ export default function NewSentence({ profile, session }) {
   const [sentenceText, setSentenceText] = useState('')
   const [savedId, setSavedId] = useState(null)
 
-  // Fetch RIPTE on config step
   useEffect(() => {
     if (step === 1 && !ripteAuto.valor) {
       setRipteAuto(p => ({ ...p, loading: true }))
@@ -91,20 +104,30 @@ export default function NewSentence({ profile, session }) {
     })
   }
 
-  async function handleFile(f) {
-    if (!f || f.type !== 'application/pdf') return
-    setFile(f)
-    const b64 = await readFile(f)
-    setFileB64(b64)
+  function getTipoArchivo(f) {
+    const name = f.name.toLowerCase()
+    if (name.endsWith('.pdf')) return 'pdf'
+    if (name.endsWith('.xlsx') || name.endsWith('.xls')) return 'excel'
+    return 'otro'
   }
 
-  function getJuezNombre(idx) {
-    const map = [
-      { largo: 'A LA PRIMERA CUESTIÓN PLANTEADA LA SEÑORA JUEZA DOCTORA ZACARÍAS', corto: 'Zacarías', weiss: false },
-      { largo: 'A LA PRIMERA CUESTIÓN PLANTEADA EL SEÑOR JUEZ DOCTOR STOLARCZYK', corto: 'Stolarczyk', weiss: false },
-      { largo: 'A LA PRIMERA CUESTIÓN PLANTEADA LA SEÑORA JUEZA DOCTORA WEISS', corto: 'Weiss', weiss: true },
-    ]
-    return map[idx]
+  async function addFiles(newFiles) {
+    const added = []
+    for (const f of newFiles) {
+      const tipo = getTipoArchivo(f)
+      const b64 = tipo === 'pdf' ? await readFile(f) : null
+      added.push({ file: f, b64, tipo, id: Math.random().toString(36).slice(2) })
+    }
+    setFiles(prev => [...prev, ...added])
+  }
+
+  function removeFile(id) {
+    setFiles(prev => prev.filter(f => f.id !== id))
+  }
+
+  function getExpedientePDF() {
+    // El primer PDF es el expediente principal
+    return files.find(f => f.tipo === 'pdf')
   }
 
   async function generate() {
@@ -114,32 +137,27 @@ export default function NewSentence({ profile, session }) {
 
     const ripte = ripteManual || ripteAuto.valor || '198.241,70'
     const ripteF = ripteAuto.fecha || 'Último publicado'
+    const voto = OPCIONES_VOTO[opcionVoto]
 
-    const juez1 = getJuezNombre(votoPrimero1)
-    const juez2 = [0,1,2].find(i => i !== votoPrimero1 && i !== 2)
-    const juez2Label = JUECES_LABEL[juez2 ?? 1]
     const config = {
-      tipo_accion: tipoAccion,
-      primer_voto_1_nombre_completo: JUECES[votoPrimero1].replace('A LA PRIMERA CUESTIÓN PLANTEADA ', ''),
-      primer_voto_2_nombre_completo: JUECES[votoPrimero2].replace('A LA PRIMERA CUESTIÓN PLANTEADA ', '').replace('PRIMERA', 'SEGUNDA'),
-      juez1: JUECES_LABEL[votoPrimero1],
-      juez2: juez2Label,
-      juez3: 'Dra. María Alejandra Weiss',
-      weissName: 'María Alejandra Weiss',
+      juez1: voto.juez1,
+      juez2: voto.juez2,
+      weiss: WEISS,
+      orden: `${voto.juez1.corto} – ${voto.juez2.corto} – ${WEISS.corto}`,
       ripte_actual: ripte,
       ripte_fecha: ripteF,
       honorarios,
-      orden_votacion: `${JUECES_LABEL[votoPrimero1]} – ${juez2Label} – Dra. Weiss`,
     }
 
+    const expedientePDF = getExpedientePDF()
+    if (!expedientePDF) { setGenError('No hay PDF del expediente cargado.'); return }
+
     try {
-      // Step 0: Extract data
       setGenStep(0); setGenProgress(8)
-      const data = await extractExpedienteData(apiKey, fileB64)
+      const data = await extractExpedienteData(apiKey, expedientePDF.b64)
       setExtractedData(data)
       data._config = config
 
-      // Step 1: RIPTE (already done)
       setGenStep(1); setGenProgress(15)
       await new Promise(r => setTimeout(r, 400))
 
@@ -148,10 +166,9 @@ export default function NewSentence({ profile, session }) {
 
       let fullText = encabezado + '\n\n'
       fullText += 'El Tribunal resolvió plantear y votar las siguientes cuestiones:\n\n'
-      fullText += 'PRIMERA CUESTIÓN: ¿Cuáles son los hechos que arriban firmes a esta instancia y cuáles los controvertidos?\n\n'
-      fullText += `${JUECES[votoPrimero1].replace('PRIMERA CUESTIÓN PLANTEADA', 'PRIMERA CUESTIÓN PLANTEADA')} DIJO:\n\n`
+      fullText += `PRIMERA CUESTIÓN: ¿Cuáles son los hechos que arriban firmes a esta instancia y cuáles los controvertidos?\n\n`
+      fullText += `A LA PRIMERA CUESTIÓN PLANTEADA ${voto.juez1.nombreCompleto} DIJO:\n\n`
 
-      // Steps 2-6: Generate sections
       const sections = [
         { key: 'antecedentes', stepIdx: 2, pct: 30 },
         { key: 'resolucion', stepIdx: 3, pct: 50 },
@@ -164,16 +181,29 @@ export default function NewSentence({ profile, session }) {
         setGenStep(stepIdx); setGenProgress(pct - 10)
         const text = await generateSentenceSection(apiKey, key, prompts[key], data, config)
         fullText += text + '\n\n'
+
+        // Insertar adhesiones según la sección
+        if (key === 'ibm') {
+          // Cierre Primera Cuestión: adhesión juez2 y Weiss
+          fullText += buildAdhesionPrimera(voto, data) + '\n\n'
+          fullText += `SEGUNDA CUESTIÓN: ¿Qué pronunciamiento corresponde dictar?\n\n`
+          fullText += `A LA SEGUNDA CUESTIÓN PLANTEADA ${voto.juez1.nombreCompleto} DIJO:\n\n`
+        }
+
         setSentenceText(fullText)
         setGenProgress(pct)
       }
 
-      // Step 7: Save
+      // Adhesión Segunda Cuestión y cierre
+      fullText += buildAdhesionSegunda(voto) + '\n\n'
+      fullText += buildCierre(data, config) + '\n\n'
+      setSentenceText(fullText)
+
       setGenStep(7); setGenProgress(98)
       const meta = {
         causa_numero: data.causa_numero || '',
         caratula: data.caratula || '',
-        tipo_accion: data.tipo_accion || tipoAccion,
+        tipo_accion: data.tipo_accion || '',
       }
       const saved = await saveSentence(session.user.id, meta, fullText)
       setSavedId(saved.id)
@@ -189,9 +219,30 @@ export default function NewSentence({ profile, session }) {
   function buildEncabezado(data, config) {
     const causa = data.causa_numero || '[N° CAUSA]'
     const caratula = data.caratula || '[CARÁTULA]'
-    const j1 = JUECES_LABEL[votoPrimero1]
-    const j2 = JUECES_LABEL[[0,1,2].find(i => i !== votoPrimero1 && i !== 2) ?? 1]
-    return `En la ciudad de Quilmes, se reúnen en la Sala de Acuerdos los Señores Jueces que, para este acto, integran el Tribunal del Trabajo N.º 5 de esta ciudad, ${j1.replace(/^Dr[ao]\.\s*/,'')}, ${j2.replace(/^Dr[ao]\.\s*/,'')} y María Alejandra Weiss, a efectos de dictar Sentencia en la causa Nº ${causa} caratulada "${caratula}", conforme el siguiente orden de votación: ${j1.split(' ').pop().toUpperCase()} – ${j2.split(' ').pop().toUpperCase()} – WEISS.`
+    const { juez1, juez2, weiss } = config
+    return `En la ciudad de Quilmes, se reúnen en la Sala de Acuerdos los Señores Jueces que, para este acto, integran el Tribunal del Trabajo N.º 5 de esta ciudad, ${juez1.corto.replace(/^Dr[ao]\.\s*/, '')}, ${juez2.corto.replace(/^Dr[ao]\.\s*/, '')} y ${weiss.nombreCivil}, a efectos de dictar Sentencia en la causa Nº ${causa} caratulada "${caratula}", conforme el siguiente orden de votación: ${juez1.nombre} – ${juez2.nombre} – ${weiss.nombre}.`
+  }
+
+  function buildAdhesionPrimera(voto, data) {
+    const { juez1, juez2 } = voto
+    const j2articulo = juez2.genero === 'm' ? 'el Señor Juez Doctor' : 'la Señora Jueza Doctora'
+    const j2nombreCompleto = juez2.genero === 'm' ? 'Mario Daniel Stolarczyk' : 'Andrea Marcela Zacarías'
+
+    const adhesionJ2 = `A la misma cuestión planteada ${j2articulo} ${j2nombreCompleto}, por compartir fundamentos, adhiere en todos sus términos al voto que antecede.`
+
+    const adhesionWeiss = `A la misma cuestión planteada ${WEISS.nombreCompleto} DIJO: En virtud de las particularidades que presenta el caso en estudio, y por los fundamentos vertidos, adhiero al voto del/de la ${juez1.corto}. Sin perjuicio de ello, dejo a salvo mi opinión respecto a que la limitación impuesta por el art. 7 de la ley 23.928 podría resultar inconstitucional en forma sobreviniente, conforme los fundamentos que he desarrollado en anteriores pronunciamientos. Así lo voto.`
+
+    return `${adhesionJ2}\n\n${adhesionWeiss}`
+  }
+
+  function buildAdhesionSegunda(voto) {
+    const { juez2 } = voto
+    const j2corto = juez2.corto.replace(/^Dr[ao]\.\s*/, '')
+    return `A la misma cuestión planteada los señores jueces doctores ${j2corto} y ${WEISS.nombreCivil}, por compartir fundamentos, adhieren en todos sus términos al voto que antecede.\n\nCon lo que terminó el Acuerdo firmando los Señores Jueces por ante mí que doy fe.`
+  }
+
+  function buildCierre(data, config) {
+    return `S  E  N  T  E  N  C  I  A\n\nAUTOS Y VISTO: CONSIDERANDO lo decidido en el Acuerdo que antecede y los fundamentos allí vertidos, el Tribunal del Trabajo N° 5 de Quilmes, por mayoría,\n\nRESUELVE:`
   }
 
   async function downloadWord() {
@@ -199,9 +250,11 @@ export default function NewSentence({ profile, session }) {
     await buildWordDocument(sentenceText, extractedData?.caratula, extractedData?.causa_numero)
   }
 
+  const expedientePDF = getExpedientePDF()
+  const archivosExtra = files.filter(f => f.tipo !== 'pdf' || f.id !== expedientePDF?.id)
+
   return (
     <div className="min-h-screen bg-slate-50">
-      {/* Header */}
       <header className="bg-white border-b border-slate-200 px-6 py-4">
         <div className="max-w-4xl mx-auto flex items-center justify-between">
           <button onClick={() => navigate('/')} className="flex items-center gap-2 text-slate-600 hover:text-slate-900">
@@ -212,7 +265,6 @@ export default function NewSentence({ profile, session }) {
         </div>
       </header>
 
-      {/* Step indicator */}
       <div className="bg-white border-b border-slate-100 px-6 py-3">
         <div className="max-w-4xl mx-auto flex items-center gap-0">
           {STEPS.map((s, i) => (
@@ -234,51 +286,86 @@ export default function NewSentence({ profile, session }) {
 
       <main className="max-w-4xl mx-auto px-6 py-8">
 
-        {/* ── STEP 0: Upload ─────────────────────────────────────────────── */}
+        {/* ── STEP 0: Upload múltiple ──────────────────────────────────── */}
         {step === 0 && (
           <div>
             <div className="mb-6">
-              <h2 className="text-xl font-semibold text-slate-800">Paso 1 — Expediente</h2>
+              <h2 className="text-xl font-semibold text-slate-800">Paso 1 — Archivos del expediente</h2>
               <p className="text-slate-500 text-sm mt-1">
-                Suba el archivo PDF con el expediente completo del caso. 
-                La IA leerá su contenido para extraer todos los datos necesarios.
+                Suba el PDF del expediente y, opcionalmente, archivos adicionales con las remuneraciones (PDF o Excel).
               </p>
             </div>
 
+            {/* Zona de drop */}
             <div
-              className={`border-2 border-dashed rounded-2xl p-12 text-center transition-all cursor-pointer ${
-                drag ? 'border-blue-400 bg-blue-50' :
-                file ? 'border-green-400 bg-green-50' : 'border-slate-300 hover:border-slate-400 bg-white'
+              className={`border-2 border-dashed rounded-2xl p-10 text-center transition-all cursor-pointer ${
+                drag ? 'border-blue-400 bg-blue-50' : 'border-slate-300 hover:border-slate-400 bg-white'
               }`}
               onDragOver={e => { e.preventDefault(); setDrag(true) }}
               onDragLeave={() => setDrag(false)}
-              onDrop={e => { e.preventDefault(); setDrag(false); handleFile(e.dataTransfer.files[0]) }}
+              onDrop={e => {
+                e.preventDefault(); setDrag(false)
+                addFiles(Array.from(e.dataTransfer.files))
+              }}
               onClick={() => fileRef.current.click()}
             >
-              <input ref={fileRef} type="file" accept="application/pdf" className="hidden"
-                onChange={e => handleFile(e.target.files[0])} />
-              {file ? (
-                <>
-                  <div className="text-4xl mb-3">✅</div>
-                  <p className="font-medium text-green-700">{file.name}</p>
-                  <p className="text-sm text-green-600 mt-1">{(file.size / 1024).toFixed(0)} KB · PDF listo</p>
-                  <p className="text-xs text-slate-400 mt-3">Haga clic para cambiar el archivo</p>
-                </>
-              ) : (
-                <>
-                  <div className="text-5xl mb-4">📂</div>
-                  <p className="font-medium text-slate-700">Arrastrá el PDF aquí o hacé clic para seleccionar</p>
-                  <p className="text-sm text-slate-400 mt-2">
-                    Suba el expediente digital completo (AUGIT/SISTAU). Puede ser escaneado o con texto seleccionable.
-                  </p>
-                  <p className="text-xs text-slate-400 mt-1">Solo archivos PDF</p>
-                </>
-              )}
+              <input
+                ref={fileRef}
+                type="file"
+                accept=".pdf,.xlsx,.xls"
+                multiple
+                className="hidden"
+                onChange={e => addFiles(Array.from(e.target.files))}
+              />
+              <div className="text-4xl mb-3">📂</div>
+              <p className="font-medium text-slate-700">Arrastrá los archivos aquí o hacé clic para seleccionar</p>
+              <p className="text-sm text-slate-400 mt-2">PDF (expediente y/o remuneraciones) · Excel (remuneraciones)</p>
+              <p className="text-xs text-slate-400 mt-1">Podés subir más de un archivo a la vez</p>
             </div>
+
+            {/* Lista de archivos cargados */}
+            {files.length > 0 && (
+              <div className="mt-5 space-y-2">
+                <p className="text-xs font-medium text-slate-500 uppercase tracking-wide mb-2">Archivos cargados</p>
+                {files.map((f, i) => (
+                  <div key={f.id} className="flex items-center gap-3 bg-white border border-slate-200 rounded-xl px-4 py-3">
+                    <span className="text-xl">{FILE_TYPES[f.file.type]?.icon || '📎'}</span>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium text-slate-700 truncate">{f.file.name}</p>
+                      <p className="text-xs text-slate-400">
+                        {(f.file.size / 1024).toFixed(0)} KB · {FILE_TYPES[f.file.type]?.label || f.tipo}
+                        {i === 0 && f.tipo === 'pdf' && (
+                          <span className="ml-2 px-1.5 py-0.5 bg-blue-100 text-blue-700 rounded text-xs font-medium">
+                            Expediente principal
+                          </span>
+                        )}
+                      </p>
+                    </div>
+                    <button onClick={() => removeFile(f.id)}
+                      className="text-slate-400 hover:text-red-500 text-lg leading-none">×</button>
+                  </div>
+                ))}
+
+                {/* Botón agregar más */}
+                <button
+                  onClick={() => fileRef.current.click()}
+                  className="w-full py-2.5 border border-dashed border-slate-300 rounded-xl text-sm text-slate-500 hover:border-blue-400 hover:text-blue-600 transition-colors"
+                >
+                  + Agregar más archivos
+                </button>
+              </div>
+            )}
+
+            {/* Advertencia si no hay PDF */}
+            {files.length > 0 && !expedientePDF && (
+              <div className="mt-3 p-3 bg-amber-50 border border-amber-200 rounded-lg text-amber-700 text-sm">
+                ⚠ Se necesita al menos un archivo PDF con el expediente para generar la sentencia.
+              </div>
+            )}
 
             <div className="mt-6 flex justify-end">
               <button
-                disabled={!file}
+                disabled={!expedientePDF}
                 onClick={() => setStep(1)}
                 className="px-6 py-3 bg-blue-900 text-white rounded-xl font-medium text-sm hover:bg-blue-800 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
               >
@@ -288,52 +375,51 @@ export default function NewSentence({ profile, session }) {
           </div>
         )}
 
-        {/* ── STEP 1: Config ─────────────────────────────────────────────── */}
+        {/* ── STEP 1: Config ───────────────────────────────────────────── */}
         {step === 1 && (
           <div>
             <div className="mb-6">
               <h2 className="text-xl font-semibold text-slate-800">Paso 2 — Configuración</h2>
               <p className="text-slate-500 text-sm mt-1">
-                Complete los datos que no pueden extraerse automáticamente del expediente.
+                El tipo de acción se detectará automáticamente del expediente. Solo configure el orden de votación y los demás datos.
               </p>
             </div>
 
             <div className="grid grid-cols-1 gap-6">
-              {/* Tipo de acción */}
-              <div className="bg-white rounded-xl border border-slate-200 p-5">
-                <h3 className="font-medium text-slate-800 mb-1">Tipo de acción</h3>
-                <p className="text-xs text-slate-400 mb-3">La IA intentará detectarlo del expediente; aquí puede confirmarlo o corregirlo antes de generar.</p>
-                <select value={tipoAccion} onChange={e => setTipoAccion(e.target.value)}
-                  className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
-                  {TIPO_ACCIONES.map(t => <option key={t}>{t}</option>)}
-                </select>
-              </div>
 
               {/* Orden de votación */}
               <div className="bg-white rounded-xl border border-slate-200 p-5">
                 <h3 className="font-medium text-slate-800 mb-1">Orden de votación</h3>
-                <p className="text-xs text-slate-400 mb-4">Seleccione quién vota primero en cada cuestión. Los demás dos adhieren.</p>
-                <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-xs font-medium text-slate-600 mb-2">Primera Cuestión (hechos)</label>
-                    {JUECES_LABEL.map((j, i) => (
-                      <label key={i} className="flex items-center gap-2 mb-2 cursor-pointer">
-                        <input type="radio" checked={votoPrimero1 === i} onChange={() => setVotoPrimero1(i)}
-                          className="accent-blue-900" />
-                        <span className="text-sm text-slate-700">{j}</span>
-                      </label>
-                    ))}
-                  </div>
-                  <div>
-                    <label className="block text-xs font-medium text-slate-600 mb-2">Segunda Cuestión (resolución)</label>
-                    {JUECES_LABEL.map((j, i) => (
-                      <label key={i} className="flex items-center gap-2 mb-2 cursor-pointer">
-                        <input type="radio" checked={votoPrimero2 === i} onChange={() => setVotoPrimero2(i)}
-                          className="accent-blue-900" />
-                        <span className="text-sm text-slate-700">{j}</span>
-                      </label>
-                    ))}
-                  </div>
+                <p className="text-xs text-slate-400 mb-4">
+                  Seleccione el resultado del sorteo. La Dra. Weiss siempre vota en tercer lugar.
+                </p>
+                <div className="space-y-3">
+                  {OPCIONES_VOTO.map((op, i) => (
+                    <label key={op.id}
+                      className={`flex items-center gap-3 p-4 rounded-xl border-2 cursor-pointer transition-all ${
+                        opcionVoto === i
+                          ? 'border-blue-900 bg-blue-50'
+                          : 'border-slate-200 hover:border-slate-300'
+                      }`}>
+                      <input type="radio" checked={opcionVoto === i} onChange={() => setOpcionVoto(i)}
+                        className="accent-blue-900 w-4 h-4" />
+                      <div>
+                        <p className="font-medium text-slate-800 text-sm">{op.label}</p>
+                        <p className="text-xs text-slate-400 mt-0.5">
+                          {op.juez1.corto} vota primero · {op.juez2.corto} adhiere · Dra. Weiss vota con salvedad art. 7 ley 23.928
+                        </p>
+                      </div>
+                    </label>
+                  ))}
+                </div>
+                <div className="mt-4 p-3 bg-slate-50 rounded-lg border border-slate-100">
+                  <p className="text-xs text-slate-500 font-medium mb-1">Esquema que se aplicará:</p>
+                  <p className="text-xs text-slate-400 leading-relaxed font-mono">
+                    1ª Cuestión: {OPCIONES_VOTO[opcionVoto].juez1.corto} (voto completo) →{' '}
+                    {OPCIONES_VOTO[opcionVoto].juez2.corto} (adhiere) → Dra. Weiss (adhiere + salvedad)<br />
+                    2ª Cuestión: {OPCIONES_VOTO[opcionVoto].juez1.corto} (voto completo) →{' '}
+                    {OPCIONES_VOTO[opcionVoto].juez2.corto} y Weiss (adhieren juntos)
+                  </p>
                 </div>
               </div>
 
@@ -345,17 +431,17 @@ export default function NewSentence({ profile, session }) {
                 </p>
                 {ripteAuto.loading ? (
                   <div className="flex items-center gap-2 text-sm text-slate-500">
-                    <span className="w-4 h-4 border-2 border-slate-300 border-t-slate-600 rounded-full spinner"></span>
+                    <span className="w-4 h-4 border-2 border-slate-300 border-t-slate-600 rounded-full animate-spin"></span>
                     Buscando valor oficial...
                   </div>
                 ) : ripteAuto.valor ? (
-                  <div className="flex items-center gap-3">
+                  <div className="flex items-center gap-3 flex-wrap">
                     <div className="px-4 py-2.5 bg-green-50 border border-green-200 rounded-lg">
-                      <p className="text-xs text-green-600 font-medium">RIPTE obtenido automáticamente</p>
+                      <p className="text-xs text-green-600 font-medium">RIPTE oficial</p>
                       <p className="text-2xl font-bold text-green-700 font-mono">$ {ripteAuto.valor}</p>
                       {ripteAuto.fecha && <p className="text-xs text-green-500">{ripteAuto.fecha}</p>}
                     </div>
-                    <p className="text-xs text-slate-400">Si el valor no es correcto, corríjalo:</p>
+                    <p className="text-xs text-slate-400">Si el valor no es correcto, corríjalo abajo:</p>
                   </div>
                 ) : (
                   <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg text-amber-700 text-sm mb-3">
@@ -379,8 +465,7 @@ export default function NewSentence({ profile, session }) {
               <div className="bg-white rounded-xl border border-slate-200 p-5">
                 <h3 className="font-medium text-slate-800 mb-1">Honorarios</h3>
                 <p className="text-xs text-slate-400 mb-4">
-                  Ingrese los montos de honorarios para incluir en el dispositivo. 
-                  Si los deja en blanco quedarán como [A COMPLETAR].
+                  Ingrese los montos para incluir en el dispositivo. Si los deja en blanco quedarán como [A COMPLETAR].
                 </p>
                 <div className="grid grid-cols-2 gap-4">
                   <div>
@@ -440,13 +525,13 @@ export default function NewSentence({ profile, session }) {
           </div>
         )}
 
-        {/* ── STEP 2: Generating ─────────────────────────────────────────── */}
+        {/* ── STEP 2: Generating ──────────────────────────────────────── */}
         {step === 2 && (
           <div>
             <div className="mb-6">
               <h2 className="text-xl font-semibold text-slate-800">Generando proyecto de sentencia</h2>
               <p className="text-slate-500 text-sm mt-1">
-                La IA está redactando cada sección con el nivel de detalle del modelo real. Este proceso tarda 2-4 minutos.
+                La IA está redactando cada sección. Este proceso tarda 2-4 minutos.
               </p>
             </div>
 
@@ -461,7 +546,6 @@ export default function NewSentence({ profile, session }) {
               </div>
             ) : (
               <>
-                {/* Progress bar */}
                 <div className="bg-white rounded-xl border border-slate-200 p-6 mb-6">
                   <div className="flex items-center justify-between mb-3">
                     <span className="text-sm font-medium text-slate-700">
@@ -485,15 +569,13 @@ export default function NewSentence({ profile, session }) {
                     ))}
                   </div>
                 </div>
-
-                {/* Live preview */}
                 {sentenceText && (
                   <div className="bg-white rounded-xl border border-slate-200 p-6">
                     <div className="flex items-center gap-2 mb-3">
-                      <span className="w-2 h-2 bg-blue-500 rounded-full pulse-dot"></span>
+                      <span className="w-2 h-2 bg-blue-500 rounded-full animate-pulse"></span>
                       <span className="text-sm font-medium text-slate-600">Vista previa en tiempo real</span>
                     </div>
-                    <div className="sentence-preview max-h-80 overflow-y-auto text-xs bg-slate-50 p-4 rounded-lg">
+                    <div className="sentence-preview max-h-80 overflow-y-auto text-xs bg-slate-50 p-4 rounded-lg whitespace-pre-wrap">
                       {sentenceText.slice(-2000)}
                     </div>
                   </div>
@@ -503,29 +585,29 @@ export default function NewSentence({ profile, session }) {
           </div>
         )}
 
-        {/* ── STEP 3: Result ─────────────────────────────────────────────── */}
+        {/* ── STEP 3: Result ──────────────────────────────────────────── */}
         {step === 3 && (
           <div>
             <div className="mb-6 flex items-start justify-between">
               <div>
                 <h2 className="text-xl font-semibold text-slate-800">✅ Proyecto generado exitosamente</h2>
                 <p className="text-slate-500 text-sm mt-1">
-                  Revise el contenido antes de descargar. Los campos marcados como [COMPLETAR] requieren verificación manual.
+                  Revise el contenido. Los campos marcados [COMPLETAR] requieren verificación manual.
                 </p>
               </div>
             </div>
 
-            {/* Extracted data summary */}
             {extractedData && !extractedData._parseError && (
               <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 mb-4 grid grid-cols-2 gap-3 text-sm">
                 <div><span className="font-medium text-blue-800">Causa:</span> <span className="text-blue-700">{extractedData.causa_numero}</span></div>
                 <div><span className="font-medium text-blue-800">Actor/a:</span> <span className="text-blue-700">{extractedData.actor?.nombre}</span></div>
                 <div><span className="font-medium text-blue-800">Demandada:</span> <span className="text-blue-700">{Array.isArray(extractedData.demandada) ? extractedData.demandada[0]?.nombre : extractedData.demandada?.nombre}</span></div>
+                <div><span className="font-medium text-blue-800">Tipo:</span> <span className="text-blue-700">{extractedData.tipo_accion || 'Detectado automáticamente'}</span></div>
                 <div><span className="font-medium text-blue-800">Incapacidad:</span> <span className="text-blue-700">{extractedData.pericia_medica?.incapacidad_total_perito}% T.O.</span></div>
+                <div><span className="font-medium text-blue-800">Orden:</span> <span className="text-blue-700">{OPCIONES_VOTO[opcionVoto].label}</span></div>
               </div>
             )}
 
-            {/* Action buttons */}
             <div className="flex gap-3 mb-6">
               <button onClick={downloadWord}
                 className="flex items-center gap-2 px-6 py-3 bg-blue-900 text-white rounded-xl font-semibold text-sm hover:bg-blue-800 transition-colors shadow-md">
@@ -541,13 +623,12 @@ export default function NewSentence({ profile, session }) {
               </button>
             </div>
 
-            {/* Full sentence preview */}
             <div className="bg-white rounded-xl border border-slate-200">
               <div className="px-5 py-3 border-b border-slate-100 flex items-center justify-between">
                 <span className="text-sm font-medium text-slate-600">Proyecto de sentencia</span>
                 <span className="text-xs text-slate-400">{sentenceText.split(' ').length} palabras</span>
               </div>
-              <div className="sentence-preview p-6 max-h-[600px] overflow-y-auto">
+              <div className="sentence-preview p-6 max-h-[600px] overflow-y-auto whitespace-pre-wrap text-sm">
                 {sentenceText}
               </div>
             </div>
