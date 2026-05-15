@@ -18,12 +18,12 @@ export default async function handler(req, res) {
         'x-api-key': apiKey,
         'anthropic-version': '2023-06-01',
       },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-20250514',
-        max_tokens,
-        system,
-        messages
-      })
+body: JSON.stringify({
+  model: 'claude-sonnet-4-5-20251001',
+  max_tokens,
+  system,
+  messages
+})
     })
 
     const data = await anthropicRes.json()
