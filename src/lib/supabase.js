@@ -34,9 +34,12 @@ export async function getProfile(userId) {
 }
 
 export async function updateApiKey(userId, apiKey) {
-  await supabase.from('profiles').update({ anthropic_api_key: apiKey }).eq('id', userId)
+  const { error } = await supabase
+    .from('profiles')
+    .update({ anthropic_api_key: apiKey })
+    .eq('id', userId)
+  if (error) throw new Error(error.message)
 }
-
 // ── Settings helpers ──────────────────────────────────────────────────────────
 export async function getSetting(key) {
   const { data } = await supabase.from('settings').select('value').eq('key', key).single()
