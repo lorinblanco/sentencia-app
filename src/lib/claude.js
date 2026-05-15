@@ -13,19 +13,20 @@ REGLAS ABSOLUTAS:
 7. Estilo técnico-jurídico preciso, sin adornos
 8. Cuando la IA declara inconstitucionalidad del inc. 2 art. 12 LRT: fundamento completo de 6-8 párrafos`;
 
-async function callClaude(apiKey, system, messages) {
+async function callClaude(apiKey, system, messages, maxTokens = 4000) {
   const res = await fetch('/api/generate', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Api-Key': apiKey },
-    body: JSON.stringify({ system, messages, max_tokens: 1000 })
+    body: JSON.stringify({ system, messages, max_tokens: maxTokens })
   })
   if (!res.ok) {
     const err = await res.json()
-    throw new Error(err.error || `Error ${res.status}`)
+    throw new Error(err.error || `Error HTTP ${res.status}`)
   }
   const data = await res.json()
   if (data.error) throw new Error(data.error.message || JSON.stringify(data.error))
-  return data.content?.[0]?.text || ''
+  if (!data.content?.[0]?.text) throw new Error('Respuesta vacía de la API')
+  return data.content[0].text
 }
 
 // ── Step 1: Extract structured data from PDF ──────────────────────────────────
