@@ -114,7 +114,8 @@ export async function generateSentenceSection(apiKey, sectionName, prompt, exped
   return await callClaude(apiKey, TEMPLATE_CONTEXT, [{
     role: 'user',
     content: `DATOS DEL EXPEDIENTE Y CONFIGURACIÓN:\n${contextJson.slice(0, 6000)}\n\n${prompt}`
-  }])
+  }], 6000)
+}
 }
 
 // ── Prompts for each section ──────────────────────────────────────────────────
