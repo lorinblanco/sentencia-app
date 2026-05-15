@@ -1,12 +1,10 @@
 import { useState, useRef, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { extractExpedienteData, generateSentenceSection, getPrompts } from '../lib/claude'
+import {
+  extractAllText, buildChunks, extractBasicInfo, generateSection, extractExtraFileText
+} from '../lib/claude'
 import { saveSentence } from '../lib/supabase'
 import { buildWordDocument } from '../lib/word'
-
-// Weiss SIEMPRE vota última y SIEMPRE tiene la salvedad art. 7 ley 23.928
-// Solo se elige quién vota primero entre Zacarías y Stolarczyk
-// El orden es el mismo para PRIMERA y SEGUNDA cuestión
 
 const OPCIONES_VOTO = [
   {
@@ -38,33 +36,34 @@ const STEPS = [
 ]
 
 const GEN_STEPS = [
-  'Extrayendo datos del expediente...',
+  'Leyendo el PDF del expediente...',
+  'Procesando archivos adicionales...',
   'Buscando RIPTE actual...',
+  'Extrayendo datos básicos del expediente...',
   'Redactando antecedentes y hechos...',
   'Redactando resolución y pericia médica...',
   'Redactando IBM y cierre Primera Cuestión...',
-  'Redactando Segunda Cuestión...',
+  'Redactando Segunda Cuestión completa...',
   'Redactando Sentencia dispositivo...',
   'Generando archivo Word...',
 ]
 
-const FILE_TYPES = {
-  'application/pdf': { icon: '📄', label: 'PDF' },
-  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': { icon: '📊', label: 'Excel' },
-  'application/vnd.ms-excel': { icon: '📊', label: 'Excel' },
+function getTipoArchivo(f) {
+  const name = f.name.toLowerCase()
+  if (name.endsWith('.pdf')) return 'pdf'
+  if (name.endsWith('.xlsx') || name.endsWith('.xls')) return 'excel'
+  return 'otro'
 }
 
 export default function NewSentence({ profile, session }) {
   const navigate = useNavigate()
   const [step, setStep] = useState(0)
 
-  // Step 0: Archivos múltiples
-  const [files, setFiles] = useState([]) // [{ file, b64, tipo }]
+  const [files, setFiles] = useState([])
   const [drag, setDrag] = useState(false)
   const fileRef = useRef()
 
-  // Step 1: Config
-  const [opcionVoto, setOpcionVoto] = useState(0) // índice en OPCIONES_VOTO
+  const [opcionVoto, setOpcionVoto] = useState(0)
   const [ripteManual, setRipteManual] = useState('')
   const [ripteAuto, setRipteAuto] = useState({ valor: '', fecha: '', loading: false })
   const [honorarios, setHonorarios] = useState({
@@ -72,13 +71,12 @@ export default function NewSentence({ profile, session }) {
     perito: '', peritoPs: '', tienePeritoPsi: false
   })
 
-  // Step 2: Generation
   const [genStep, setGenStep] = useState(-1)
   const [genProgress, setGenProgress] = useState(0)
+  const [genSubProgress, setGenSubProgress] = useState(0)
   const [genError, setGenError] = useState('')
   const [extractedData, setExtractedData] = useState(null)
 
-  // Step 3: Result
   const [sentenceText, setSentenceText] = useState('')
   const [savedId, setSavedId] = useState(null)
 
@@ -95,29 +93,12 @@ export default function NewSentence({ profile, session }) {
     }
   }, [step])
 
-  function readFile(f) {
-    return new Promise((res, rej) => {
-      const fr = new FileReader()
-      fr.onload = () => res(fr.result.split(',')[1])
-      fr.onerror = rej
-      fr.readAsDataURL(f)
-    })
-  }
-
-  function getTipoArchivo(f) {
-    const name = f.name.toLowerCase()
-    if (name.endsWith('.pdf')) return 'pdf'
-    if (name.endsWith('.xlsx') || name.endsWith('.xls')) return 'excel'
-    return 'otro'
-  }
-
-  async function addFiles(newFiles) {
-    const added = []
-    for (const f of newFiles) {
-      const tipo = getTipoArchivo(f)
-      const b64 = tipo === 'pdf' ? await readFile(f) : null
-      added.push({ file: f, b64, tipo, id: Math.random().toString(36).slice(2) })
-    }
+  function addFiles(newFiles) {
+    const added = newFiles.map(f => ({
+      file: f,
+      tipo: getTipoArchivo(f),
+      id: Math.random().toString(36).slice(2)
+    }))
     setFiles(prev => [...prev, ...added])
   }
 
@@ -126,12 +107,16 @@ export default function NewSentence({ profile, session }) {
   }
 
   function getExpedientePDF() {
-    // El primer PDF es el expediente principal
     return files.find(f => f.tipo === 'pdf')
   }
 
+  function getArchivosExtra() {
+    const exp = getExpedientePDF()
+    return files.filter(f => f.id !== exp?.id)
+  }
+
   async function generate() {
-    setStep(2); setGenError(''); setGenStep(0); setGenProgress(5)
+    setStep(2); setGenError(''); setGenStep(0); setGenProgress(2); setGenSubProgress(0)
     const apiKey = profile.anthropic_api_key
     if (!apiKey) { setGenError('Configure su API key en Configuración.'); return }
 
@@ -153,59 +138,78 @@ export default function NewSentence({ profile, session }) {
     if (!expedientePDF) { setGenError('No hay PDF del expediente cargado.'); return }
 
     try {
-      setGenStep(0); setGenProgress(8)
-      const data = await extractExpedienteData(apiKey, expedientePDF.b64)
-      setExtractedData(data)
-      data._config = config
+      setGenStep(0); setGenProgress(5)
+      const { fullText } = await extractAllText(expedientePDF.file, (pct) => {
+        setGenSubProgress(pct)
+        setGenProgress(5 + Math.round(pct * 0.15))
+      })
 
-      setGenStep(1); setGenProgress(15)
-      await new Promise(r => setTimeout(r, 400))
-
-      const prompts = getPrompts(data, config)
-      const encabezado = buildEncabezado(data, config)
-
-      let fullText = encabezado + '\n\n'
-      fullText += 'El Tribunal resolvió plantear y votar las siguientes cuestiones:\n\n'
-      fullText += `PRIMERA CUESTIÓN: ¿Cuáles son los hechos que arriban firmes a esta instancia y cuáles los controvertidos?\n\n`
-      fullText += `A LA PRIMERA CUESTIÓN PLANTEADA ${voto.juez1.nombreCompleto} DIJO:\n\n`
-
-      const sections = [
-        { key: 'antecedentes', stepIdx: 2, pct: 30 },
-        { key: 'resolucion', stepIdx: 3, pct: 50 },
-        { key: 'ibm', stepIdx: 4, pct: 65 },
-        { key: 'segunda', stepIdx: 5, pct: 80 },
-        { key: 'sentencia', stepIdx: 6, pct: 95 },
-      ]
-
-      for (const { key, stepIdx, pct } of sections) {
-        setGenStep(stepIdx); setGenProgress(pct - 10)
-        const text = await generateSentenceSection(apiKey, key, prompts[key], data, config)
-        fullText += text + '\n\n'
-
-        // Insertar adhesiones según la sección
-        if (key === 'ibm') {
-          // Cierre Primera Cuestión: adhesión juez2 y Weiss
-          fullText += buildAdhesionPrimera(voto, data) + '\n\n'
-          fullText += `SEGUNDA CUESTIÓN: ¿Qué pronunciamiento corresponde dictar?\n\n`
-          fullText += `A LA SEGUNDA CUESTIÓN PLANTEADA ${voto.juez1.nombreCompleto} DIJO:\n\n`
+      setGenStep(1); setGenProgress(22)
+      const archivosExtra = getArchivosExtra()
+      const extraTexts = []
+      for (const f of archivosExtra) {
+        try {
+          const text = await extractExtraFileText(f.file)
+          if (text) extraTexts.push(text)
+        } catch (e) {
+          console.warn('Error leyendo archivo extra:', f.file.name, e)
         }
-
-        setSentenceText(fullText)
-        setGenProgress(pct)
       }
 
-      // Adhesión Segunda Cuestión y cierre
-      fullText += buildAdhesionSegunda(voto) + '\n\n'
-      fullText += buildCierre(data, config) + '\n\n'
-      setSentenceText(fullText)
+      const chunks = buildChunks(fullText, extraTexts)
 
-      setGenStep(7); setGenProgress(98)
+      setGenStep(2); setGenProgress(28)
+      await new Promise(r => setTimeout(r, 300))
+
+      setGenStep(3); setGenProgress(35)
+      const data = await extractBasicInfo(apiKey, chunks)
+      setExtractedData(data)
+
+      const encabezado = buildEncabezado(data, config)
+      let fullSentence = encabezado + '\n\n'
+      fullSentence += 'El Tribunal resolvió plantear y votar las siguientes cuestiones:\n\n'
+      fullSentence += `PRIMERA CUESTIÓN: ¿Cuáles son los hechos que arriban firmes a esta instancia y cuáles los controvertidos?\n\n`
+      fullSentence += `A LA PRIMERA CUESTIÓN PLANTEADA ${voto.juez1.nombreCompleto} DIJO:\n\n`
+      setSentenceText(fullSentence)
+
+      setGenStep(4); setGenProgress(45)
+      const antecedentes = await generateSection(apiKey, 'antecedentes', chunks, data, config)
+      fullSentence += antecedentes + '\n\n'
+      setSentenceText(fullSentence)
+
+      setGenStep(5); setGenProgress(60)
+      const resolucion = await generateSection(apiKey, 'resolucion', chunks, data, config)
+      fullSentence += resolucion + '\n\n'
+      setSentenceText(fullSentence)
+
+      setGenStep(6); setGenProgress(72)
+      const ibm = await generateSection(apiKey, 'ibm', chunks, data, config)
+      fullSentence += ibm + '\n\n'
+      fullSentence += buildAdhesionPrimera(voto) + '\n\n'
+      fullSentence += `SEGUNDA CUESTIÓN: ¿Qué pronunciamiento corresponde dictar?\n\n`
+      fullSentence += `A LA SEGUNDA CUESTIÓN PLANTEADA ${voto.juez1.nombreCompleto} DIJO:\n\n`
+      setSentenceText(fullSentence)
+
+      setGenStep(7); setGenProgress(85)
+      const segunda = await generateSection(apiKey, 'segunda', chunks, data, config)
+      fullSentence += segunda + '\n\n'
+      fullSentence += buildAdhesionSegunda(voto) + '\n\n'
+      setSentenceText(fullSentence)
+
+      setGenStep(8); setGenProgress(93)
+      const dispositivo = await generateSection(apiKey, 'sentencia', chunks, data, config)
+      fullSentence += `S  E  N  T  E  N  C  I  A\n\n`
+      fullSentence += `AUTOS Y VISTO: CONSIDERANDO lo decidido en el Acuerdo que antecede y los fundamentos allí vertidos, el Tribunal del Trabajo N° 5 de Quilmes, por mayoría,\n\nRESUELVE:\n\n`
+      fullSentence += dispositivo
+      setSentenceText(fullSentence)
+
+      setGenStep(9); setGenProgress(98)
       const meta = {
         causa_numero: data.causa_numero || '',
         caratula: data.caratula || '',
-        tipo_accion: data.tipo_accion || '',
+        tipo_accion: data.tipo_accion || data.tipo_accion_detectado || '',
       }
-      const saved = await saveSentence(session.user.id, meta, fullText)
+      const saved = await saveSentence(session.user.id, meta, fullSentence)
       setSavedId(saved.id)
       setGenProgress(100)
       setStep(3)
@@ -220,29 +224,25 @@ export default function NewSentence({ profile, session }) {
     const causa = data.causa_numero || '[N° CAUSA]'
     const caratula = data.caratula || '[CARÁTULA]'
     const { juez1, juez2, weiss } = config
-    return `En la ciudad de Quilmes, se reúnen en la Sala de Acuerdos los Señores Jueces que, para este acto, integran el Tribunal del Trabajo N.º 5 de esta ciudad, ${juez1.corto.replace(/^Dr[ao]\.\s*/, '')}, ${juez2.corto.replace(/^Dr[ao]\.\s*/, '')} y ${weiss.nombreCivil}, a efectos de dictar Sentencia en la causa Nº ${causa} caratulada "${caratula}", conforme el siguiente orden de votación: ${juez1.nombre} – ${juez2.nombre} – ${weiss.nombre}.`
+    const j1Sin = juez1.corto.replace(/^Dr[ao]\.\s*/, '')
+    const j2Sin = juez2.corto.replace(/^Dr[ao]\.\s*/, '')
+    return `En la ciudad de Quilmes, se reúnen en la Sala de Acuerdos los Señores Jueces que, para este acto, integran el Tribunal del Trabajo N.º 5 de esta ciudad, ${j1Sin}, ${j2Sin} y ${weiss.nombreCivil}, a efectos de dictar Sentencia en la causa Nº ${causa} caratulada "${caratula}", conforme el siguiente orden de votación: ${juez1.nombre} – ${juez2.nombre} – ${weiss.nombre}.`
   }
 
-  function buildAdhesionPrimera(voto, data) {
-    const { juez1, juez2 } = voto
+  function buildAdhesionPrimera(voto) {
+    const { juez2 } = voto
     const j2articulo = juez2.genero === 'm' ? 'el Señor Juez Doctor' : 'la Señora Jueza Doctora'
-    const j2nombreCompleto = juez2.genero === 'm' ? 'Mario Daniel Stolarczyk' : 'Andrea Marcela Zacarías'
-
-    const adhesionJ2 = `A la misma cuestión planteada ${j2articulo} ${j2nombreCompleto}, por compartir fundamentos, adhiere en todos sus términos al voto que antecede.`
-
-    const adhesionWeiss = `A la misma cuestión planteada ${WEISS.nombreCompleto} DIJO: En virtud de las particularidades que presenta el caso en estudio, y por los fundamentos vertidos, adhiero al voto del/de la ${juez1.corto}. Sin perjuicio de ello, dejo a salvo mi opinión respecto a que la limitación impuesta por el art. 7 de la ley 23.928 podría resultar inconstitucional en forma sobreviniente, conforme los fundamentos que he desarrollado en anteriores pronunciamientos. Así lo voto.`
-
+    const j2nombre = juez2.genero === 'm' ? 'Mario Daniel Stolarczyk' : 'Andrea Marcela Zacarías'
+    const j1corto = voto.juez1.corto
+    const adhesionJ2 = `A la misma cuestión planteada ${j2articulo} ${j2nombre}, por compartir fundamentos, adhiere en todos sus términos al voto que antecede.`
+    const adhesionWeiss = `A la misma cuestión planteada ${WEISS.nombreCompleto} DIJO: En virtud de las particularidades que presenta el caso en estudio, y por los fundamentos vertidos, adhiero al voto de ${j1corto}. Sin perjuicio de ello, dejo a salvo mi opinión respecto a que la limitación impuesta por el art. 7 de la ley 23.928 podría resultar inconstitucional en forma sobreviniente, conforme los fundamentos que he desarrollado en anteriores pronunciamientos. Así lo voto.`
     return `${adhesionJ2}\n\n${adhesionWeiss}`
   }
 
   function buildAdhesionSegunda(voto) {
     const { juez2 } = voto
-    const j2corto = juez2.corto.replace(/^Dr[ao]\.\s*/, '')
-    return `A la misma cuestión planteada los señores jueces doctores ${j2corto} y ${WEISS.nombreCivil}, por compartir fundamentos, adhieren en todos sus términos al voto que antecede.\n\nCon lo que terminó el Acuerdo firmando los Señores Jueces por ante mí que doy fe.`
-  }
-
-  function buildCierre(data, config) {
-    return `S  E  N  T  E  N  C  I  A\n\nAUTOS Y VISTO: CONSIDERANDO lo decidido en el Acuerdo que antecede y los fundamentos allí vertidos, el Tribunal del Trabajo N° 5 de Quilmes, por mayoría,\n\nRESUELVE:`
+    const j2sin = juez2.corto.replace(/^Dr[ao]\.\s*/, '')
+    return `A la misma cuestión planteada los señores jueces doctores ${j2sin} y ${WEISS.nombreCivil}, por compartir fundamentos, adhieren en todos sus términos al voto que antecede.\n\nCon lo que terminó el Acuerdo firmando los Señores Jueces por ante mí que doy fe.`
   }
 
   async function downloadWord() {
@@ -251,7 +251,6 @@ export default function NewSentence({ profile, session }) {
   }
 
   const expedientePDF = getExpedientePDF()
-  const archivosExtra = files.filter(f => f.tipo !== 'pdf' || f.id !== expedientePDF?.id)
 
   return (
     <div className="min-h-screen bg-slate-50">
@@ -286,17 +285,15 @@ export default function NewSentence({ profile, session }) {
 
       <main className="max-w-4xl mx-auto px-6 py-8">
 
-        {/* ── STEP 0: Upload múltiple ──────────────────────────────────── */}
         {step === 0 && (
           <div>
             <div className="mb-6">
               <h2 className="text-xl font-semibold text-slate-800">Paso 1 — Archivos del expediente</h2>
               <p className="text-slate-500 text-sm mt-1">
-                Suba el PDF del expediente y, opcionalmente, archivos adicionales con las remuneraciones (PDF o Excel).
+                Suba el PDF del expediente y, opcionalmente, archivos con las remuneraciones (PDF o Excel).
               </p>
             </div>
 
-            {/* Zona de drop */}
             <div
               className={`border-2 border-dashed rounded-2xl p-10 text-center transition-all cursor-pointer ${
                 drag ? 'border-blue-400 bg-blue-50' : 'border-slate-300 hover:border-slate-400 bg-white'
@@ -320,21 +317,20 @@ export default function NewSentence({ profile, session }) {
               <div className="text-4xl mb-3">📂</div>
               <p className="font-medium text-slate-700">Arrastrá los archivos aquí o hacé clic para seleccionar</p>
               <p className="text-sm text-slate-400 mt-2">PDF (expediente y/o remuneraciones) · Excel (remuneraciones)</p>
-              <p className="text-xs text-slate-400 mt-1">Podés subir más de un archivo a la vez</p>
+              <p className="text-xs text-slate-400 mt-1">Podés subir varios archivos a la vez</p>
             </div>
 
-            {/* Lista de archivos cargados */}
             {files.length > 0 && (
               <div className="mt-5 space-y-2">
                 <p className="text-xs font-medium text-slate-500 uppercase tracking-wide mb-2">Archivos cargados</p>
-                {files.map((f, i) => (
+                {files.map(f => (
                   <div key={f.id} className="flex items-center gap-3 bg-white border border-slate-200 rounded-xl px-4 py-3">
-                    <span className="text-xl">{FILE_TYPES[f.file.type]?.icon || '📎'}</span>
+                    <span className="text-xl">{f.tipo === 'pdf' ? '📄' : f.tipo === 'excel' ? '📊' : '📎'}</span>
                     <div className="flex-1 min-w-0">
                       <p className="text-sm font-medium text-slate-700 truncate">{f.file.name}</p>
                       <p className="text-xs text-slate-400">
-                        {(f.file.size / 1024).toFixed(0)} KB · {FILE_TYPES[f.file.type]?.label || f.tipo}
-                        {i === 0 && f.tipo === 'pdf' && (
+                        {(f.file.size / 1024).toFixed(0)} KB · {f.tipo.toUpperCase()}
+                        {f.id === expedientePDF?.id && (
                           <span className="ml-2 px-1.5 py-0.5 bg-blue-100 text-blue-700 rounded text-xs font-medium">
                             Expediente principal
                           </span>
@@ -345,8 +341,6 @@ export default function NewSentence({ profile, session }) {
                       className="text-slate-400 hover:text-red-500 text-lg leading-none">×</button>
                   </div>
                 ))}
-
-                {/* Botón agregar más */}
                 <button
                   onClick={() => fileRef.current.click()}
                   className="w-full py-2.5 border border-dashed border-slate-300 rounded-xl text-sm text-slate-500 hover:border-blue-400 hover:text-blue-600 transition-colors"
@@ -356,10 +350,9 @@ export default function NewSentence({ profile, session }) {
               </div>
             )}
 
-            {/* Advertencia si no hay PDF */}
             {files.length > 0 && !expedientePDF && (
               <div className="mt-3 p-3 bg-amber-50 border border-amber-200 rounded-lg text-amber-700 text-sm">
-                ⚠ Se necesita al menos un archivo PDF con el expediente para generar la sentencia.
+                ⚠ Se necesita al menos un PDF con el expediente.
               </div>
             )}
 
@@ -375,19 +368,17 @@ export default function NewSentence({ profile, session }) {
           </div>
         )}
 
-        {/* ── STEP 1: Config ───────────────────────────────────────────── */}
         {step === 1 && (
           <div>
             <div className="mb-6">
               <h2 className="text-xl font-semibold text-slate-800">Paso 2 — Configuración</h2>
               <p className="text-slate-500 text-sm mt-1">
-                El tipo de acción se detectará automáticamente del expediente. Solo configure el orden de votación y los demás datos.
+                El tipo de acción se detecta automáticamente del expediente. Solo configure el orden de votación y demás datos.
               </p>
             </div>
 
             <div className="grid grid-cols-1 gap-6">
 
-              {/* Orden de votación */}
               <div className="bg-white rounded-xl border border-slate-200 p-5">
                 <h3 className="font-medium text-slate-800 mb-1">Orden de votación</h3>
                 <p className="text-xs text-slate-400 mb-4">
@@ -397,9 +388,7 @@ export default function NewSentence({ profile, session }) {
                   {OPCIONES_VOTO.map((op, i) => (
                     <label key={op.id}
                       className={`flex items-center gap-3 p-4 rounded-xl border-2 cursor-pointer transition-all ${
-                        opcionVoto === i
-                          ? 'border-blue-900 bg-blue-50'
-                          : 'border-slate-200 hover:border-slate-300'
+                        opcionVoto === i ? 'border-blue-900 bg-blue-50' : 'border-slate-200 hover:border-slate-300'
                       }`}>
                       <input type="radio" checked={opcionVoto === i} onChange={() => setOpcionVoto(i)}
                         className="accent-blue-900 w-4 h-4" />
@@ -412,23 +401,11 @@ export default function NewSentence({ profile, session }) {
                     </label>
                   ))}
                 </div>
-                <div className="mt-4 p-3 bg-slate-50 rounded-lg border border-slate-100">
-                  <p className="text-xs text-slate-500 font-medium mb-1">Esquema que se aplicará:</p>
-                  <p className="text-xs text-slate-400 leading-relaxed font-mono">
-                    1ª Cuestión: {OPCIONES_VOTO[opcionVoto].juez1.corto} (voto completo) →{' '}
-                    {OPCIONES_VOTO[opcionVoto].juez2.corto} (adhiere) → Dra. Weiss (adhiere + salvedad)<br />
-                    2ª Cuestión: {OPCIONES_VOTO[opcionVoto].juez1.corto} (voto completo) →{' '}
-                    {OPCIONES_VOTO[opcionVoto].juez2.corto} y Weiss (adhieren juntos)
-                  </p>
-                </div>
               </div>
 
-              {/* RIPTE */}
               <div className="bg-white rounded-xl border border-slate-200 p-5">
                 <h3 className="font-medium text-slate-800 mb-1">RIPTE actual</h3>
-                <p className="text-xs text-slate-400 mb-3">
-                  Valor actualizado automáticamente desde el sitio oficial del Ministerio de Trabajo.
-                </p>
+                <p className="text-xs text-slate-400 mb-3">Valor actualizado automáticamente.</p>
                 {ripteAuto.loading ? (
                   <div className="flex items-center gap-2 text-sm text-slate-500">
                     <span className="w-4 h-4 border-2 border-slate-300 border-t-slate-600 rounded-full animate-spin"></span>
@@ -441,11 +418,10 @@ export default function NewSentence({ profile, session }) {
                       <p className="text-2xl font-bold text-green-700 font-mono">$ {ripteAuto.valor}</p>
                       {ripteAuto.fecha && <p className="text-xs text-green-500">{ripteAuto.fecha}</p>}
                     </div>
-                    <p className="text-xs text-slate-400">Si el valor no es correcto, corríjalo abajo:</p>
                   </div>
                 ) : (
                   <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg text-amber-700 text-sm mb-3">
-                    No se pudo obtener automáticamente. Ingrese el valor manualmente.
+                    No se pudo obtener automáticamente. Ingréselo manualmente.
                   </div>
                 )}
                 <div className="mt-3">
@@ -461,12 +437,9 @@ export default function NewSentence({ profile, session }) {
                 </div>
               </div>
 
-              {/* Honorarios */}
               <div className="bg-white rounded-xl border border-slate-200 p-5">
                 <h3 className="font-medium text-slate-800 mb-1">Honorarios</h3>
-                <p className="text-xs text-slate-400 mb-4">
-                  Ingrese los montos para incluir en el dispositivo. Si los deja en blanco quedarán como [A COMPLETAR].
-                </p>
+                <p className="text-xs text-slate-400 mb-4">Si los deja en blanco quedarán como [A COMPLETAR].</p>
                 <div className="grid grid-cols-2 gap-4">
                   <div>
                     <label className="block text-xs font-medium text-slate-600 mb-1">Letrado/a actor/a</label>
@@ -525,20 +498,19 @@ export default function NewSentence({ profile, session }) {
           </div>
         )}
 
-        {/* ── STEP 2: Generating ──────────────────────────────────────── */}
         {step === 2 && (
           <div>
             <div className="mb-6">
               <h2 className="text-xl font-semibold text-slate-800">Generando proyecto de sentencia</h2>
               <p className="text-slate-500 text-sm mt-1">
-                La IA está redactando cada sección. Este proceso tarda 2-4 minutos.
+                Leyendo el PDF localmente y enviando solo las secciones relevantes a la IA. Esto tarda 2-4 minutos.
               </p>
             </div>
 
             {genError ? (
               <div className="bg-red-50 border border-red-200 rounded-xl p-6">
                 <p className="font-medium text-red-700 mb-2">Error durante la generación</p>
-                <p className="text-sm text-red-600">{genError}</p>
+                <p className="text-sm text-red-600 whitespace-pre-wrap">{genError}</p>
                 <button onClick={() => setStep(1)}
                   className="mt-4 px-4 py-2 border border-red-300 text-red-700 rounded-lg text-sm hover:bg-red-50">
                   ← Volver a configuración
@@ -557,18 +529,33 @@ export default function NewSentence({ profile, session }) {
                     <div className="h-full bg-blue-900 rounded-full transition-all duration-500"
                       style={{ width: `${genProgress}%` }} />
                   </div>
-                  <div className="mt-4 grid grid-cols-4 gap-2">
-                    {GEN_STEPS.slice(0, 8).map((s, i) => (
+
+                  {genStep === 0 && genSubProgress > 0 && (
+                    <div className="mt-3">
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-xs text-slate-500">Leyendo páginas del PDF...</span>
+                        <span className="text-xs text-slate-400">{genSubProgress}%</span>
+                      </div>
+                      <div className="h-1 bg-slate-100 rounded-full overflow-hidden">
+                        <div className="h-full bg-blue-400 rounded-full transition-all duration-300"
+                          style={{ width: `${genSubProgress}%` }} />
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="mt-4 grid grid-cols-5 gap-2">
+                    {GEN_STEPS.slice(0, 10).map((s, i) => (
                       <div key={i} className={`text-xs px-2 py-1.5 rounded text-center ${
                         genStep > i ? 'bg-green-100 text-green-700' :
                         genStep === i ? 'bg-blue-100 text-blue-700 font-medium' :
                         'bg-slate-100 text-slate-400'
                       }`}>
-                        {genStep > i ? '✓ ' : ''}{s.replace('...', '')}
+                        {genStep > i ? '✓' : (i + 1)}
                       </div>
                     ))}
                   </div>
                 </div>
+
                 {sentenceText && (
                   <div className="bg-white rounded-xl border border-slate-200 p-6">
                     <div className="flex items-center gap-2 mb-3">
@@ -576,7 +563,7 @@ export default function NewSentence({ profile, session }) {
                       <span className="text-sm font-medium text-slate-600">Vista previa en tiempo real</span>
                     </div>
                     <div className="sentence-preview max-h-80 overflow-y-auto text-xs bg-slate-50 p-4 rounded-lg whitespace-pre-wrap">
-                      {sentenceText.slice(-2000)}
+                      {sentenceText.slice(-2500)}
                     </div>
                   </div>
                 )}
@@ -585,14 +572,13 @@ export default function NewSentence({ profile, session }) {
           </div>
         )}
 
-        {/* ── STEP 3: Result ──────────────────────────────────────────── */}
         {step === 3 && (
           <div>
             <div className="mb-6 flex items-start justify-between">
               <div>
                 <h2 className="text-xl font-semibold text-slate-800">✅ Proyecto generado exitosamente</h2>
                 <p className="text-slate-500 text-sm mt-1">
-                  Revise el contenido. Los campos marcados [COMPLETAR] requieren verificación manual.
+                  Revise el contenido. Los campos [COMPLETAR] requieren verificación manual.
                 </p>
               </div>
             </div>
@@ -602,7 +588,7 @@ export default function NewSentence({ profile, session }) {
                 <div><span className="font-medium text-blue-800">Causa:</span> <span className="text-blue-700">{extractedData.causa_numero}</span></div>
                 <div><span className="font-medium text-blue-800">Actor/a:</span> <span className="text-blue-700">{extractedData.actor?.nombre}</span></div>
                 <div><span className="font-medium text-blue-800">Demandada:</span> <span className="text-blue-700">{Array.isArray(extractedData.demandada) ? extractedData.demandada[0]?.nombre : extractedData.demandada?.nombre}</span></div>
-                <div><span className="font-medium text-blue-800">Tipo:</span> <span className="text-blue-700">{extractedData.tipo_accion || 'Detectado automáticamente'}</span></div>
+                <div><span className="font-medium text-blue-800">Tipo:</span> <span className="text-blue-700">{extractedData.tipo_accion || extractedData.tipo_accion_detectado || 'No detectado'}</span></div>
                 <div><span className="font-medium text-blue-800">Incapacidad:</span> <span className="text-blue-700">{extractedData.pericia_medica?.incapacidad_total_perito}% T.O.</span></div>
                 <div><span className="font-medium text-blue-800">Orden:</span> <span className="text-blue-700">{OPCIONES_VOTO[opcionVoto].label}</span></div>
               </div>
