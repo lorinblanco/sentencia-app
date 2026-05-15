@@ -1,0 +1,27 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@import url('https://fonts.googleapis.com/css2?family=EB+Garamond:ital,wght@0,400;0,500;0,600;1,400&family=Inter:wght@300;400;500;600;700&display=swap');
+
+body { font-family: 'Inter', sans-serif; }
+.font-garamond { font-family: 'EB Garamond', serif; }
+
+.sentence-preview {
+  font-family: 'EB Garamond', serif;
+  font-size: 15px;
+  line-height: 1.9;
+  color: #1a1a1a;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.step-active { @apply bg-blue-900 text-white; }
+.step-done { @apply bg-green-700 text-white; }
+.step-pending { @apply bg-slate-200 text-slate-500; }
+
+@keyframes spin { to { transform: rotate(360deg); } }
+.spinner { animation: spin 0.8s linear infinite; }
+
+@keyframes pulse-dot { 0%,100%{opacity:1} 50%{opacity:.3} }
+.pulse-dot { animation: pulse-dot 1.2s ease-in-out infinite; }
