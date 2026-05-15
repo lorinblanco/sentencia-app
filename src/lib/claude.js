@@ -1,30 +1,159 @@
-// Claude API client - proxied through Vercel Edge Function
+// SentencIA - Claude API client v6
+// Extrae texto del PDF localmente con PDF.js y envía solo chunks específicos a la API
+// Esto evita el rate limit de 30k tokens/min al no mandar PDFs binarios
 
-const TEMPLATE_CONTEXT = `Sos la Dra. Andrea Marcela Zacarías (u otro magistrado designado primer voto), integrante del Tribunal del Trabajo N°5 de Quilmes.
+async function loadPdfjs() {
+  if (window.pdfjsLib) return
+  await new Promise((resolve, reject) => {
+    const s = document.createElement('script')
+    s.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js'
+    s.onload = resolve
+    s.onerror = reject
+    document.head.appendChild(s)
+  })
+  window.pdfjsLib.GlobalWorkerOptions.workerSrc =
+    'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'
+}
+
+async function getPageText(pdf, n) {
+  try {
+    const page = await pdf.getPage(n)
+    const c = await page.getTextContent()
+    return c.items.map(i => i.str).join(' ')
+  } catch (e) { return '' }
+}
+
+// Extrae texto completo del PDF
+export async function extractAllText(file, onProgress) {
+  await loadPdfjs()
+  const ab = await file.arrayBuffer()
+  const pdf = await window.pdfjsLib.getDocument({ data: ab }).promise
+  const total = pdf.numPages
+  const maxPages = Math.min(total, 600)
+  let text = ''
+
+  for (let i = 1; i <= maxPages; i++) {
+    text += await getPageText(pdf, i) + '\n'
+    if (onProgress && i % 30 === 0) {
+      onProgress(Math.round(i / maxPages * 80))
+    }
+  }
+
+  if (onProgress) onProgress(85)
+  return { fullText: text, totalPages: total }
+}
+
+// Divide el texto en chunks específicos por keywords
+export function buildChunks(fullText, extraTexts = []) {
+  const fl = fullText.toLowerCase()
+  const len = fullText.length
+
+  function find(keywords) {
+    let best = -1
+    for (const kw of keywords) {
+      const idx = fl.indexOf(kw)
+      if (idx > 0 && (best < 0 || idx < best)) best = idx
+    }
+    return best
+  }
+
+  function slice(start, size) {
+    if (start < 0) return ''
+    return fullText.slice(Math.max(0, start), Math.min(len, start + size))
+  }
+
+  // Header: primeros 25k chars
+  const header = fullText.slice(0, Math.min(25000, Math.floor(len * 0.15)))
+
+  // Pericia: buscar hallazgos médicos exactos
+  let periIdx = find([
+    'flexion disminuida', 'flexión disminuida',
+    'movimientos de flexion', 'movimientos de flexión',
+    'portal artroscopico', 'portal artroscópico',
+    'hipotrofia cuadricipital', 'hipotrofia',
+    'bostezo articular', 'bostezo y cajon', 'bostezo y cajón',
+    'cajon anterior', 'cajón anterior',
+    'tinel positivo', 'tinel negativo',
+    'phalen positivo', 'phalen negativo',
+    'escala de beck', 'escala de hamilton',
+    'hamilton:', 'beck:',
+    'examen pericial', 'examen fisico pericial',
+    'practico el examen', 'practicó el examen'
+  ])
+  if (periIdx < 0) periIdx = find([
+    'dictamino', 'dictaminó',
+    'perito medico designado', 'el galeno determino',
+    'segun el baremo', 'conforme el baremo',
+    'incapacidad parcial y permanente del',
+    't.o. por'
+  ])
+  const pericia = periIdx > 0
+    ? slice(periIdx - 3000, 22000)
+    : fullText.slice(Math.floor(len * 0.40), Math.floor(len * 0.40) + 22000)
+
+  // AFIP/IBM: salarios y RIPTE
+  let afipIdx = find([
+    'vib (ripte)', 'v.i.b. (ripte)',
+    'ripte del periodo', 'ripte del período',
+    'salario actualizado', 'salarios actualizados',
+    'valor ingreso base', 'ingreso base mensual',
+    'remuneraciones informadas por afip',
+    '202103', '202101', '202201', '202301', '202401', '202501'
+  ])
+  if (afipIdx < 0) afipIdx = find(['afip', 'ripte'])
+
+  let afip = afipIdx > 0
+    ? slice(afipIdx - 2000, 22000)
+    : fullText.slice(Math.floor(len * 0.58), Math.floor(len * 0.58) + 22000)
+
+  // Si hay archivos extra (remuneraciones), agregarlos al chunk AFIP
+  if (extraTexts.length > 0) {
+    afip = 'REMUNERACIONES INFORMADAS POR AFIP (archivos adjuntos):\n\n' +
+           extraTexts.join('\n\n---\n\n') +
+           '\n\n=== TEXTO DEL EXPEDIENTE ===\n\n' + afip
+  }
+
+  // Alegatos
+  const alegIdx = find([
+    'presenta alegato', 'presentó su alegato',
+    'presento su alegato', 'ha quedado probado',
+    'han quedado probados'
+  ])
+  const alegatos = alegIdx > 0
+    ? slice(alegIdx - 2000, 20000)
+    : fullText.slice(Math.floor(len * 0.76), Math.floor(len * 0.76) + 20000)
+
+  // Final: últimos 12k chars
+  const final_ = fullText.slice(Math.max(0, len - 12000))
+
+  return { header, pericia, afip, alegatos, final: final_ }
+}
+
+const SYSTEM = `Sos la Dra. Andrea Marcela Zacarías (u otro magistrado designado primer voto), integrante del Tribunal del Trabajo N°5 de Quilmes.
 Redactás proyectos de sentencias judiciales laborales con el NIVEL DE DETALLE EXACTO de los modelos reales del Tribunal.
 
 REGLAS ABSOLUTAS:
-1. El nivel de detalle debe ser MÁXIMO: describís cada hallazgo físico del perito (grados de movimiento exactos, signos Tinel/Phalen/bostezo/cajón, estudios complementarios con fechas, material de osteosíntesis si hay)
-2. Las escalas psicológicas van completas cuando las hay (Beck, Hamilton, TEPT, Rosenberg)
-3. La tabla AFIP/RIPTE va completa con los 12 meses individuales (período, salario, RIPTE, actualizado)
-4. La fundamentación legal es extensa: Muzychuk (SCBA - inconstitucionalidad DNU 669/19), Barrios (con cita textual), Monchiero, Amaya, Aquino, Milone, Ascua, Vizzoti
-5. Las hipótesis IBM: (a) tasa activa BNA, (b) RIPTE actualizado al último publicado
-6. Nunca resumís. Si falta un dato del expediente, lo dejás en [COMPLETAR] pero el resto va completo y detallado
+1. Cuando leés texto de un expediente, extraés y usás TODOS los datos concretos. NUNCA escribís [COMPLETAR] si el dato aparece en el texto.
+2. Nivel de detalle MÁXIMO: describís cada hallazgo del perito (grados de movimiento exactos, signos Tinel/Phalen/bostezo/cajón, estudios con fechas, material de osteosíntesis)
+3. Escalas psicológicas completas (Beck, Hamilton, TEPT, Rosenberg) si las hay
+4. Tabla AFIP/RIPTE completa: los 12 meses individuales (período, salario, RIPTE, actualizado)
+5. Fundamentación legal extensa: Muzychuk SCBA (inconstitucionalidad DNU 669/19), Barrios (cita textual), Monchiero, Amaya, Aquino, Milone, Ascua, Vizzoti
+6. Hipótesis IBM: (a) tasa activa BNA, (b) RIPTE actualizado al último publicado
 7. Estilo técnico-jurídico preciso, sin adornos
-8. Cuando la IA declara inconstitucionalidad del inc. 2 art. 12 LRT: fundamento completo de 6-8 párrafos`;
+8. Inconstitucionalidad del inc. 2 art. 12 LRT: fundamento completo de 6-8 párrafos`
 
-async function callClaude(apiKey, system, messages, maxTokens = 4000) {
+async function callClaude(apiKey, messages, maxTokens = 4000) {
   const res = await fetch('/api/generate', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Api-Key': apiKey },
-    body: JSON.stringify({ system, messages, max_tokens: maxTokens })
+    body: JSON.stringify({ system: SYSTEM, messages, max_tokens: maxTokens })
   })
-  const responseText = await res.text()
+  const txt = await res.text()
   let data
   try {
-    data = JSON.parse(responseText)
+    data = JSON.parse(txt)
   } catch {
-    throw new Error(`Respuesta inválida del servidor (${res.status}): ${responseText.slice(0, 200)}`)
+    throw new Error(`Respuesta inválida (${res.status}): ${txt.slice(0, 200)}`)
   }
   if (!res.ok) {
     throw new Error(data.error?.message || data.error || `Error HTTP ${res.status}`)
@@ -34,15 +163,10 @@ async function callClaude(apiKey, system, messages, maxTokens = 4000) {
   return data.content[0].text
 }
 
-// ── Step 1: Extract structured data from PDF ──────────────────────────────────
-export async function extractExpedienteData(apiKey, pdfBase64) {
-  const extractSystem = `Sos un asistente judicial especializado en causas laborales del Tribunal de Trabajo N°5 de Quilmes. 
-Extraés datos de expedientes judiciales con máxima precisión. 
-Respondés ÚNICAMENTE con JSON válido, sin texto adicional, sin bloques de código markdown.`
+// Extrae datos básicos del expediente (causa, caratula, partes, accidente, etc.)
+export async function extractBasicInfo(apiKey, chunks) {
+  const prompt = `Del siguiente texto de inicio de un expediente judicial argentino del Tribunal del Trabajo N°5 de Quilmes, extraé exactamente estos datos. Respondé SOLO el JSON, sin texto adicional ni bloques markdown:
 
-  const extractPrompt = `Analizá este expediente judicial y extraé TODOS los datos relevantes para dictar sentencia.
-
-Devolvé ÚNICAMENTE este JSON (sin texto extra):
 {
   "causa_numero": "",
   "caratula": "",
@@ -50,252 +174,216 @@ Devolvé ÚNICAMENTE este JSON (sin texto extra):
   "actor": { "nombre": "", "dni": "", "cuil": "", "fecha_nacimiento": "", "edad_al_accidente": null, "domicilio": "", "tareas": "" },
   "demandada": [{ "nombre": "", "cuit": "" }],
   "empleador": { "nombre": "", "cuit": "" },
-  "letrado_actor": { "nombre": "", "matricula": "", "calidad": "apoderado" },
-  "letrado_actor_patrocinante": { "nombre": "", "matricula": "" },
+  "letrado_actor": { "nombre": "", "matricula": "" },
   "letrado_demandada": [{ "nombre": "", "matricula": "" }],
-  "accidente": {
-    "fecha": "", "hora": "", "tipo": "",
-    "descripcion_detallada": "",
-    "diagnostico_inicial": "", "prestador_inicial": "",
-    "intervenciones_quirurgicas": "", "fecha_alta": ""
-  },
-  "tramite_cm": {
-    "expediente_srt": "", "comision_medica": "373-Quilmes",
-    "fecha_dictamen_cm": "", "incapacidad_cm": "", "diagnostico_cm": ""
-  },
-  "tramite_judicial": {
-    "fecha_demanda": "", "fecha_contestacion": "",
-    "excepcion_prescripcion": false,
-    "fecha_apertura_prueba": "",
-    "fecha_informativa_srt": "", "fecha_informativa_afip": "",
-    "fecha_dictamen_pericial": "", "fecha_impugnacion_pericia": "",
-    "fecha_respuesta_perito": "",
-    "fecha_alegatos_actor": "", "fecha_alegatos_demandada": "",
-    "fecha_pase_acuerdo": "", "otros_actos": []
-  },
+  "accidente": { "fecha": "", "descripcion_detallada": "", "diagnostico_inicial": "", "intervenciones_quirurgicas": "", "fecha_alta": "" },
+  "tramite_cm": { "expediente_srt": "", "fecha_dictamen_cm": "", "incapacidad_cm": "" },
   "pericia_medica": {
-    "perito_nombre": "", "perito_matricula": "",
-    "region_1": { "nombre": "", "diagnostico": "", "hallazgos_examen": "", "grados_movimiento": "", "signos_especiales": "", "estudios_complementarios": "" },
-    "region_2": { "nombre": "", "diagnostico": "", "hallazgos_examen": "" },
-    "region_3": { "nombre": "", "diagnostico": "", "hallazgos_examen": "" },
-    "incapacidad_fisica_porcentaje": null, "incapacidad_fisica_detalle": "",
-    "factores_ponderacion": { "dificultad_porcentaje": null, "edad_porcentaje": null, "descripcion": "" },
-    "incapacidad_total_perito": null,
-    "impugnacion_fundamentos": "", "respuesta_perito": ""
+    "perito_nombre": "", "incapacidad_total_perito": null,
+    "incapacidad_fisica_porcentaje": null,
+    "factores_ponderacion": { "porcentaje": null }
   },
-  "pericia_psiquiatrica": {
-    "tiene": false, "perito_nombre": "", "perito_matricula": "",
-    "escalas_aplicadas": [], "diagnostico": "",
-    "incapacidad_porcentaje": null, "impugnacion": ""
-  },
-  "datos_afip": {
-    "salarios_mensuales": [],
-    "ripte_contingencia_mes": "", "ripte_contingencia_valor": null,
-    "vib_ripte_base": null, "ibm_con_intereses": null
-  },
-  "inconstitucionalidades_planteadas": [],
-  "resultado_propuesto": "favorable"
-}`
+  "pericia_psiquiatrica": { "tiene": false, "incapacidad_porcentaje": null },
+  "tipo_accion_detectado": ""
+}
 
-  const text = await callClaude(apiKey, extractSystem, [{
-    role: 'user',
-    content: [
-      { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: pdfBase64 } },
-      { type: 'text', text: extractPrompt }
-    ]
-  }])
+TIPOS DE ACCIÓN POSIBLES (elegí el que corresponda):
+- "Acción especial – Ley 24.557"
+- "Revisión resolución CM – Art. 2 inc. J ley 15.057"
+- "Apelación resolución administrativa – Ley 27.348"
+- "Enfermedad profesional – Acción especial"
 
+TEXTO DEL EXPEDIENTE:
+${chunks.header.slice(0, 12000)}`
+
+  const text = await callClaude(apiKey, [{ role: 'user', content: prompt }], 2000)
   try {
     const clean = text.replace(/```json|```/g, '').trim()
     return JSON.parse(clean)
   } catch {
-    return { raw: text, _parseError: true }
+    return { _parseError: true, raw: text }
   }
 }
 
-// ── Sentence generation (5 section calls) ─────────────────────────────────────
-export async function generateSentenceSection(apiKey, sectionName, prompt, expedienteData, config) {
-  const contextJson = JSON.stringify({ expediente: expedienteData, config }, null, 2)
-  return await callClaude(apiKey, TEMPLATE_CONTEXT, [{
-    role: 'user',
-    content: `DATOS DEL EXPEDIENTE Y CONFIGURACIÓN:\n${contextJson.slice(0, 6000)}\n\n${prompt}`
-  }], 6000)
+// Genera una sección específica de la sentencia
+export async function generateSection(apiKey, sectionType, chunks, data, config) {
+  const prompt = buildPrompt(sectionType, chunks, data, config)
+  return await callClaude(apiKey, [{ role: 'user', content: prompt }], 6000)
 }
 
-// ── Prompts for each section ──────────────────────────────────────────────────
-export function getPrompts(data, config) {
-  const { primer_voto_1, primer_voto_2, ripte_actual, ripte_fecha, honorarios } = config
-  const actorGen = /a$/i.test(data.actor?.nombre?.split(' ')[0] || '')
-  const elLa = actorGen ? 'la actora' : 'el actor'
-  const suPronoun = actorGen ? 'su' : 'su'
+function buildPrompt(type, chunks, data, config) {
+  const { juez1, juez2, weiss, honorarios = {} } = config
+  const ripte = config.ripte_actual || '[RIPTE ACTUAL]'
+  const rfecha = config.ripte_fecha || '[FECHA]'
 
-  return {
-    antecedentes: `Redactá ÚNICAMENTE la sección "Antecedentes:" de la Primera Cuestión.
+  const j1Corto = juez1?.corto || 'Dra. Zacarías'
+  const j2Corto = juez2?.corto || 'Dr. Stolarczyk'
+  const j2NombreCompleto = juez2?.nombreCompleto || 'EL SEÑOR JUEZ DOCTOR STOLARCZYK'
+  const weissNombreCompleto = weiss?.nombreCompleto || 'LA SEÑORA JUEZA DOCTORA WEISS'
 
-NIVEL DE DETALLE OBLIGATORIO (igual al modelo real del Tribunal):
-- Fecha exacta de presentación de la demanda
-- Nombre completo del letrado actor con matrícula y calidad (apoderado/patrocinante)
-- Relato completo del accidente: fecha, hora si está, lugar, tareas que realizaba, mecánica DETALLADA del siniestro, diagnóstico inicial, prestadores, intervenciones quirúrgicas con fechas, alta médica
-- Incapacidades reclamadas (física X%, psíquica X% si hay) en contraste con el % de la CM
-- Todos los planteos de inconstitucionalidad articulados
-- Fecha de presentación de la contestación, nombre del letrado demandada con matrícula
-- Postura de la demandada: negativas pormenorizadas, impugnaciones, excepciones (prescripción si hay), su versión de los hechos si difiere
-- Auto de apertura a prueba (fecha)
-- Todas las informativas con fechas (SRT, AFIP primera y segunda si hay)
-- Fecha del dictamen pericial médico (y psiquiátrico si hay)
-- Fechas de todas las impugnaciones y respuestas del perito
-- Fechas de alegatos de ambas partes
-- Fecha del pase al Acuerdo
-- Cualquier otro acto relevante
+  const REGLA = 'REGLA: Usá TODOS los datos exactos del texto. NUNCA pongas [COMPLETAR] si el dato está en el texto.\n\n'
 
-Comenzá directamente con "Antecedentes:" y terminá justo antes de "Resolución:". 
-NO incluyas encabezados ni texto antes de "Antecedentes:".`,
-
-    resolucion: `Redactá ÚNICAMENTE la sección "Resolución:" de la Primera Cuestión.
-
-ESTRUCTURA OBLIGATORIA con nivel de detalle MÁXIMO:
-
-1. HECHOS INCUESTIONADOS (2-3 párrafos):
-"Teniendo en cuenta que la parte actora persigue la indemnización por incapacidad laboral... corresponde abocarse a definir si corresponde o no dicho reclamo."
-"Teniendo en cuenta los términos de la demanda y de la contestación, llega incuestionado que ${elLa} sufrió [accidente/enfermedad] el [fecha]; que la accionada brindó las correspondientes prestaciones hasta el alta médica del [fecha] y que llevó a cabo el procedimiento administrativo ante la C.M. (expte. SRT N° [número]), en el que se determinó que ${elLa} padecía un [X]% de incapacidad. En virtud de la disconformidad con lo allí resuelto se presenta ${elLa} ante los estrados judiciales. Las partes discrepan en cuanto al porcentaje de incapacidad..."
-
-2. PERICIA MÉDICA DETALLADA:
-"Al efecto y a fin de discernir la cuestión controvertida, este órgano jurisdiccional cuenta con la pericia médica presentada en fecha [fecha] por el Dr./Dra. [perito], quien luego de brindar los antecedentes de interés médico legal, practicó el examen médico pericial:"
-
-Para CADA región afectada, describir en detalle:
-- Presencia/ausencia de deformaciones articulares visibles
-- Arcos de movimiento con grados exactos (ej: "flexión de 0° a 110°, extensión de 0° a 30°")
-- Signos clínicos específicos (Tinel positivo/negativo, Phalen positivo/negativo, bostezo, cajón, Lassègue, etc.)
-- Estado muscular (tono, fuerza, hipotrofia si hay, con localización)
-- Material de osteosíntesis si corresponde
-- Exámenes complementarios (resonancias, radiografías) con fechas y hallazgos relevantes
-
-Si hay pericia psiquiátrica:
-- Escalas aplicadas con resultados (Beck: X/63, Hamilton: X/52, TEPT: X/80, Rosenberg: X/40)
-- Descripción clínica del cuadro
-- Diagnóstico con encuadre en DSM/CIE
-
-Porcentajes determinados (física, psíquica, factores de ponderación con detalle, total).
-
-3. ANÁLISIS DE IMPUGNACIONES:
-Si la demandada impugnó la pericia: mencioná los fundamentos de la impugnación y la respuesta del perito.
-
-4. CONCLUSIÓN:
-"No hallando razones que ameriten apartarme de lo dictaminado por el perito médico, considerando al efecto las objeciones formuladas por la parte demandada en fecha [fecha] y las explicaciones brindadas por el galeno, tengo por probado que ${elLa} es portador/a de una incapacidad psicofísica parcial y permanente del [X]% de la T.O. por el accidente por el que aquí se acciona."
-
-Comenzá directamente con "Resolución:" y terminá antes del IBM.`,
-
-    ibm: `Redactá la sección del IBM y el cierre de la Primera Cuestión.
-
-ESTRUCTURA OBLIGATORIA:
-
-1. PÁRRAFO INTRODUCTORIO IBM:
-"A fin de determinar el ingreso base mensual, tendré en consideración el promedio mensual de todos los salarios devengados —de conformidad con lo establecido por el artículo 1° del Convenio N° 95 de la OIT— por el trabajador durante el año anterior al accidente, según las remuneraciones informadas por AFIP (prueba informativa recibida el [fecha]), actualizados mes a mes aplicándose la variación del índice RIPTE (Remuneraciones Imponibles Promedio de los Trabajadores Estables):"
-
-2. TABLA AFIP/RIPTE (si tenés los datos en el expediente):
-Para cada uno de los 12 meses: período, salario AFIP original, RIPTE del período, salario actualizado
-Si no tenés los datos exactos: describí el método y usá [COMPLETAR CON DATOS AFIP]
-
-3. RESULTADOS:
-- Total salarios actualizados por RIPTE
-- RIPTE a la fecha de la contingencia: [valor]
-- Valor Ingreso Base (VIB/IBM) art. 12 LRT: $ [IBM base]
-- IBM con intereses (tasa activa BNA desde fecha accidente hasta fecha dictamen): $ [IBM con intereses]
-
-4. EDAD:
-"Teniendo en cuenta la fecha de nacimiento del actor/la actora —[fecha]—, y la del accidente sufrido —[fecha]—, tengo por acreditado que contaba con [X] años de edad a la fecha del siniestro."
-
-5. CIERRE PRIMERA CUESTIÓN:
-"Así lo voto (art. 57 inc. 4) ley 15.057)."
-"A la misma cuestión planteada los Señores Jueces/la Señora Jueza Doctora/el Señor Juez Doctor ${config.juez2} y ${config.juez3}, por compartir fundamentos, adhieren al voto que antecede."
-
-6. VOTO WEISS (siempre, aunque vote en otra posición):
-"A LA PRIMERA CUESTIÓN PLANTEADA LA SEÑORA JUEZA DOCTORA ${config.weissName?.toUpperCase() || 'WEISS'} DIJO:
-Sin perjuicio de compartir la solución adoptada en cuanto a la procedencia de la actualización del ingreso base mensual conforme al índice RIPTE, discrepo con el fundamento en que se sustenta. Mientras el voto mayoritario —siguiendo el criterio del Tribunal del Trabajo N.º 5— basa su decisión en la declaración de inconstitucionalidad del inciso 2 del artículo 12 de la Ley de Riesgos del Trabajo, considero, conforme a la postura que mantengo en el Tribunal del Trabajo N.º 4 que integro, que tanto la procedencia de la actualización como la invalidez de la norma citada derivan de la inconstitucionalidad sobreviniente del artículo 7 de la ley 23.928, conforme lo dispuesto por la ley 25.561, cuya tacha fue oportunamente articulada por la parte actora.
-Así lo voto."
-
-NO incluyas la Segunda Cuestión.`,
-
-    segunda: `Redactá la SEGUNDA CUESTIÓN completa.
-
-Empezá con:
-"SEGUNDA CUESTIÓN: ¿Qué pronunciamiento corresponde dictar?
-
-A LA SEGUNDA CUESTIÓN PLANTEADA ${config.primer_voto_2_nombre_completo} DIJO:"
-
-ESTRUCTURA CON MÁXIMO DETALLE:
-
-1. SÍNTESIS (2 párrafos): 
-- Lo probado (incapacidad %, IBM base)
-- IBM actualizado con RIPTE y adición de intereses: $ [IBM art.12]
-
-2. RAZONAMIENTO CONSTITUCIONAL COMPLETO (8-10 párrafos extensos):
-a) Art. 11 ley 27.348 y su finalidad
-b) DNU 669/19: "aunque inconstitucional por falta de los presupuestos de necesidad y urgencia, según lo resuelto por la Suprema Corte de Justicia de la Provincia de Buenos Aires en el precedente 'Muzychuk'..."
-c) Los vaivenes normativos y la ausencia de criterio sostenido
-d) Fallo Barrios SCBA: CITAR TEXTUALMENTE: "el alza generalizada de los precios y la depreciación monetaria, agravados en los últimos tiempos y fuertemente en el último bienio, parece una constante"
-e) SCBA: "Monchiero" L.120.521, "Amaya" L.120.648
-f) CSJN: "Aquino", "Milone", "Ascua", "Vizzoti" - tutela preferente del trabajador
-g) Incompatibilidad inc. 2 art. 12 LRT con arts. 14 bis y 17 CN
-h) Conclusión: declarar inconstitucionalidad del inc. 2 art. 12 LRT
-
-3. COMPARATIVA IBM (párrafo central del argumento):
-"Adviértase que la fórmula indemnizatoria utilizando la tasa de interés devengada entre la fecha del infortunio ([fecha accidente]) hasta la actualidad calculada según el promedio de la tasa activa cartera general nominal anual vencida a treinta (30) días del Banco de la Nación Argentina arroja un IBM de $ [IBM TASA ACTIVA - completar con planilla BNA oficial] y una indemnización de $ [INDEMNIZACIÓN A]; mientras que si se aplicara en igual período el índice RIPTE, el IBM se elevaría a $ [IBM RIPTE] y la indemnización alcanzaría el importe de $ [INDEMNIZACIÓN B] (según el siguiente detalle: último RIPTE publicado ${ripte_fecha}: $ ${ripte_actual} / RIPTE [mes accidente]: $ [RIPTE ACCIDENTE]; coeficiente: ${ripte_actual} / [RIPTE ACC] = [COEF]; IBM base $ [IBM BASE] × [COEF] = $ [IBM RIPTE]; 53 × $ [IBM RIPTE] × 65 ./. [edad] × [%]%)."
-
-4. CÁLCULO FINAL:
-"Por ello y teniendo en cuenta los hechos probados en el Veredicto, de acuerdo con lo previsto por los arts. 6 y 14.2 de la ley 24.557, corresponde —teniendo en cuenta la edad del trabajador/la trabajadora a la fecha del accidente ([X] años), la minusvalía de su capacidad laborativa ([X]%)— la indemnización que le corresponde arroja la suma de $ [MONTO] (53 × $ [IBM RIPTE] × 65 ./. [edad] × [%]%)."
-
-"Corresponde adicionar a la suma liquidada de $ [MONTO] el 20% previsto en el art. 3 ley 26.773 de $ [20%]."
-
-"El monto total al que asciende la indemnización... asciende a la suma de pesos [EN LETRAS] ([MONTO] + [20%] = [TOTAL])."
-
-5. INTERESES:
-"Este Tribunal de Trabajo Nº 5, al aplicar la actualización por RIPTE en virtud de la declaración de inconstitucionalidad del inc. 2 del art. 12 LRT, considera inapropiado fijar además una tasa de interés pura adicional sobre el IBM, dado que ello generaría un incremento excesivo del crédito ya actualizado, superando una compensación razonablemente justa."
-"A partir de la mora en el pago... art. 770 CCC... tasa activa BNA 30 días... hasta la efectiva cancelación."
-
-6. ABSTRACTO INCONSTITUCIONALIDADES
-
-7. COSTAS: "...a cargo de [demandada] en su condición de vencida (art. 24 ley 15.057)."
-
-8. "Así lo voto (art. 57 inc. 4) ley 15.057)."
-   Adhesión del segundo juez
-   Adhesión de Weiss con su salvedad`,
-
-    sentencia: `Redactá la SENTENCIA DISPOSITIVO completa.
-
-Empezá con:
-"Con lo que terminó el Acuerdo firmando los Señores Jueces por ante mí que doy fe.
-
-\\t\\t\\t\\tS  E  N  T  E  N  C  I  A
-
-AUTOS Y VISTO: CONSIDERANDO: Lo resuelto en el Acuerdo que antecede y conforme los fundamentos allí vertidos, el Tribunal del Trabajo N° 5, por mayoría RESUELVE:"
-
-INCISOS EN ORDEN EXACTO:
-1°) Declarar la inconstitucionalidad del DNU 669/19 (art. 99 inc. 3° CN) y la inconstitucionalidad sobrevenida e inaplicabilidad al caso del inciso segundo del art. 12 ley 24.557 (por violentar arts. 14 bis, 17 y 33 CN).
-
-2°) Hacer lugar a la demanda. Monto: LETRAS ($ NÚMERO). Plazo: 10 días de quedar firme. Nombre del actor. Nombre de la demandada. Artículos: 6.1, 8.1 y 14.2.a ley 24.557, art. 12 ley 27.348, art. 3 ley 26.773. Incapacidad X% T.O. Arts. 345 CPCC y 89 ley 15.057.
-
-3°) INSTRUCCIONES CBU (texto íntegro):
-"En atención a lo dispuesto por el art. 17 de la ley 27.348; el monto de condena, se abonará por la demandada obligada al pago, en forma directa en la cuenta bancaria sueldo –ley 26.590– del trabajador (actor). A tal fin, se debe adjuntar constancia de CBU del acreedor judicial e informar sus datos en el expediente: nombre y apellido completo, CBU, CUIT, DNI, número y tipo de cuenta, banco, sucursal y localidad, correo electrónico, en el cuerpo del escrito que presenten.
-Si el trabajador no contara con cuenta sueldo a su exclusiva titularidad –ley 26.590–, bajo juramento de decir verdad que no cuenta con la misma, podrá denunciar cualquier otra cuenta bancaria de la que sea único y exclusivo titular, no admitiéndose cuentas que contaren con otros titulares o, en su defecto, abrir a su exclusiva titularidad una cuenta gratuita en el Banco de la Provincia de Buenos Aires. (Cuenta DNI).
-Una vez que se cumpla lo indicado en el párrafo anterior, comenzará a correr el plazo impuesto en la sentencia para que el obligado realice el pago.
-La parte obligada al pago deberá acreditar en autos el debido cumplimiento de las obligaciones dinerarias impuestas dentro del mismo plazo que se dispone para que las abone."
-
-4°) Intereses: art. 770 CCC, acumulación al capital, tasa activa BNA 30 días hasta cancelación efectiva.
-
-5°) Costas a cargo de la demandada (art. 24 ley 15.057).
-
-6°) Honorarios letrado actor: ${honorarios.actorNombre || '[LETRADO ACTOR]'} en la suma de $ ${honorarios.actor || '[A COMPLETAR]'} (IUS según ac. 4200/25); letrado demandada: ${honorarios.demNombre || '[LETRADO DEMANDADA]'} en la suma de $ ${honorarios.dem || '[A COMPLETAR]'}; aportes previsionales 10% e IVA en caso de corresponder (arts. 2, 10, 13, 15, 16, 21, 23, 28, 29, 43, 51 y 54 ley 14.967).
-Honorarios perito médico Dr./Dra. [PERITO]: $ ${honorarios.perito || '[A COMPLETAR]'} + aportes ley 6.742 y decreto 1.845/64 + IVA.
-${honorarios.peritoPs ? `Honorarios perito psiquiatra/psicólogo Dr./Dra. [PERITO PSI]: $ ${honorarios.peritoPs} + aportes + IVA.` : ''}
-
-7°) Instrucciones pago honorarios:
-"Los honorarios se abonarán directamente en las cuentas bancarias de los profesionales (abogados y peritos), quienes deben adjuntar constancia de CBU y factura correspondiente e informar sus datos en el expediente: nombre y apellido completo, CBU, CUIT, DNI, número y tipo de cuenta, banco, sucursal y localidad, correo electrónico, en el cuerpo del escrito que presenten; conforme a las pautas que se especifican en: http://blogs.scba.gov.ar/tribunaltrabajo5quilmes/2020/08/12/solicitud-de-tranferencias/ (art. 12 ley 15.057).
-Una vez que se cumpla lo indicado en el párrafo anterior, comenzará a correr el plazo para que el obligado realice el pago.
-Asimismo, se hace saber que deberán acompañar los comprobantes de pago de aportes."
-
-REGISTRESE, NOTIFIQUESE, con transcripción de lo dispuesto en el art. 54 Ley 14.967 y oportunamente ARCHIVESE.
-
-"ARTÍCULO 54.- Las providencias que regulen honorarios deberán ser notificadas personalmente, por cédula a sus beneficiarios, al mandante o patrocinado y al condenado en costas, si lo hubiere. Asimismo, será válida la notificación de la regulación de honorarios efectuada por cualquier otro medio fehaciente, a costa del interesado. Los honorarios a cargo del mandante o patrocinado quedarán firmes a su respecto si la notificación se hubiere practicado en su domicilio real y a la contraparte en su domicilio constituido. Habiendo cesado el patrocinio o apoderamiento y constituido el ex cliente nuevo domicilio, la notificación de honorarios a éste podrá ser efectuada en este último domicilio. En todos los casos, bajo pena de nulidad, en el instrumento de notificación que se utilice para ello, deberá transcribirse este artículo. Los honorarios regulados por trabajos judiciales deberán abonarse dentro de los diez (10) días de haber quedado firme el auto regulatorio. Los honorarios por trabajos extrajudiciales se abonarán dentro de los diez (10) días de intimado su pago, cuando sean exigibles. Operada la mora, el profesional podrá optar por: a) reclamar los honorarios expresados en la unidad arancelaria Jus prevista en esta ley, con más un interés del 12% anual. b) reclamar los honorarios regulados convertidos al momento de la mora en moneda de curso legal, con más el interés previsto en el artículo 552 del Código Civil y Comercial de la Nación."`
+  if (type === 'antecedentes') {
+    return REGLA +
+      'TEXTO DEL EXPEDIENTE (demanda, accidente, contestación, prueba):\n' +
+      chunks.header + '\n\n' +
+      'Redactá ÚNICAMENTE la sección "Antecedentes:" de la Primera Cuestión.\n\n' +
+      'NIVEL DE DETALLE OBLIGATORIO:\n' +
+      '- Fecha exacta de presentación de la demanda + letrado actor con tomo/folio/colegio\n' +
+      '- Datos completos del actor: nombre, DNI, CUIL, fecha de nacimiento, domicilio, tareas\n' +
+      '- Datos del empleador: nombre, CUIT, descripción de tareas, horario\n' +
+      '- Relato detallado del accidente: fecha, hora, lugar, mecánica del siniestro\n' +
+      '- Diagnóstico inicial, prestadores, intervenciones quirúrgicas con fechas, alta médica\n' +
+      '- Incapacidad reclamada (física X%, psíquica X%) vs % CM, número expediente SRT\n' +
+      '- Todos los planteos de inconstitucionalidad articulados\n' +
+      '- Fecha de la contestación + letrado demandada con tomo/folio\n' +
+      '- Postura de la demandada (reconocimientos, negativas, excepciones)\n' +
+      '- Auto de apertura a prueba (fecha), informativas (AFIP y SRT con fechas)\n' +
+      '- Dictamen pericial médico (fecha), impugnaciones y respuestas (fechas)\n' +
+      '- Alegatos actor y demandada (fechas), pase al Acuerdo (fecha)\n\n' +
+      'Comenzá exactamente con "Antecedentes:" — sin título adicional.'
   }
+
+  if (type === 'resolucion') {
+    return REGLA +
+      'TEXTO DEL EXPEDIENTE — DICTAMEN PERICIAL MÉDICO:\n' + chunks.pericia + '\n\n' +
+      'CONTEXTO — INICIO DEL EXPEDIENTE:\n' + chunks.header.slice(0, 4000) + '\n\n' +
+      'Redactá ÚNICAMENTE la sección "Resolución:" de la Primera Cuestión.\n\n' +
+      'ESTRUCTURA:\n\n' +
+      '1. HECHOS INCUESTIONADOS (2-3 párrafos): accidente firme, prestaciones ART, % CM con N° expediente SRT, disconformidad.\n\n' +
+      '2. PERICIA MÉDICA DETALLADA — la sección más extensa, usando TODOS los hallazgos del dictamen.\n' +
+      '   Empezá con: "Al efecto y a fin de discernir la cuestión controvertida, este órgano jurisdiccional cuenta con la pericia médica presentada en fecha [fecha] por el Dr./Dra. [perito], M.P. [matrícula], quien luego de brindar los antecedentes de interés médico legal, practicó el examen médico pericial:"\n\n' +
+      '   Para CADA región afectada describí en detalle:\n' +
+      '   - Diagnóstico específico\n' +
+      '   - Grados exactos de movimiento (ej: flexión 0°-110°, extensión 0°-30°)\n' +
+      '   - Signos clínicos (Tinel +/-, Phalen +/-, bostezo +/-, cajón +/-, Lassègue)\n' +
+      '   - Estado muscular (hipotrofia, fuerza)\n' +
+      '   - Material de osteosíntesis si hay\n' +
+      '   - Estudios complementarios con fecha y hallazgos\n\n' +
+      '   Si hay pericia psiquiátrica: escalas con resultados numéricos (Beck X/63, Hamilton X/52, TEPT X/80, Rosenberg X/40), diagnóstico DSM/CIE.\n\n' +
+      '   Porcentajes: cada región con su %, factores de ponderación, TOTAL %.\n\n' +
+      '3. ANÁLISIS DE IMPUGNACIONES (si las hay): fundamentos demandada y respuesta del perito.\n\n' +
+      '4. CONCLUSIÓN: "No hallando razones que ameriten apartarme de lo dictaminado por el perito médico, considerando las objeciones de la parte demandada en fecha [fecha] y las explicaciones del galeno, tengo por probado que [el/la actor/a] es portador/a de una incapacidad psicofísica parcial y permanente del [X]% de la T.O. por el accidente por el que aquí se acciona."\n\n' +
+      'Comenzá exactamente con "Resolución:"'
+  }
+
+  if (type === 'ibm') {
+    return REGLA +
+      'TEXTO DEL EXPEDIENTE — SECCIÓN AFIP/RIPTE/IBM:\n' + chunks.afip + '\n\n' +
+      'CONTEXTO — INICIO:\n' + chunks.header.slice(0, 3000) + '\n\n' +
+      'Redactá la sección IBM y el cierre de la Primera Cuestión:\n\n' +
+      '1. INTRODUCCIÓN IBM:\n' +
+      '   "A fin de determinar el ingreso base mensual, tendré en consideración el promedio mensual de todos los salarios devengados —de conformidad con lo establecido por el artículo 1° del Convenio N° 95 de la OIT— por el trabajador durante el año anterior al accidente, según las remuneraciones informadas por AFIP (prueba informativa recibida el [fecha]), actualizados mes a mes aplicándose la variación del índice RIPTE:"\n\n' +
+      '2. TABLA DE 12 MESES: si tenés los salarios AFIP y valores RIPTE en el texto, transcribí TODOS con formato:\n' +
+      '   PERÍODO: $ SALARIO_AFIP → actualizado: $ SALARIO_ACTUALIZADO\n' +
+      '   Luego: Total salarios actualizados por RIPTE: $ TOTAL\n\n' +
+      `3. "RIPTE a la fecha de la contingencia: [valor exacto si está en el texto]"\n` +
+      `   "RIPTE actual (último publicado): $ ${ripte} (${rfecha})"\n` +
+      `   "Valor Ingreso Base (VIB/IBM) art. 12 LRT: $ [monto exacto]"\n` +
+      `   "IBM con intereses (tasa activa BNA desde fecha accidente): $ [monto]"\n\n` +
+      '4. EDAD: "Teniendo en cuenta la fecha de nacimiento del/de la actor/a —[fecha]—, y la del accidente sufrido —[fecha]—, tengo por acreditado que contaba con [X] años de edad a la fecha del siniestro."\n\n' +
+      '5. CIERRE: "Así lo voto (art. 57 inc. 4) ley 15.057)."\n\n' +
+      'No incluyas Segunda Cuestión ni adhesiones. Solo terminá con "Así lo voto".'
+  }
+
+  if (type === 'segunda') {
+    return REGLA +
+      'TEXTO DEL EXPEDIENTE — DICTAMEN, AFIP y ALEGATOS:\n' +
+      chunks.afip.slice(0, 10000) + '\n\n--- ALEGATOS ---\n\n' + chunks.alegatos + '\n\n' +
+      'Redactá ÚNICAMENTE el contenido del voto de la SEGUNDA CUESTIÓN (sin el encabezado "SEGUNDA CUESTIÓN" ni "A LA SEGUNDA CUESTIÓN PLANTEADA").\n\n' +
+      'ESTRUCTURA con MÁXIMO DETALLE:\n\n' +
+      '1. SÍNTESIS (2 párrafos): lo probado (incapacidad %, IBM base) + IBM actualizado con RIPTE + intereses.\n\n' +
+      '2. RAZONAMIENTO CONSTITUCIONAL (8-10 párrafos extensos):\n' +
+      '   a) Art. 11 ley 27.348 y su finalidad\n' +
+      '   b) DNU 669/19: "aunque inconstitucional por falta de los presupuestos de necesidad y urgencia, según lo resuelto por la SCBA en \'Muzychuk\'..."\n' +
+      '   c) Fallo Barrios SCBA: CITAR TEXTUALMENTE: "el alza generalizada de los precios y la depreciación monetaria, agravados en los últimos tiempos y fuertemente en el último bienio, parece una constante"\n' +
+      '   d) Monchiero L.120.521, Amaya L.120.648, Aquino, Milone, Ascua, Vizzoti — tutela preferente del trabajador\n' +
+      '   e) Incompatibilidad inc. 2 art. 12 LRT con arts. 14 bis y 17 CN\n' +
+      '   f) Declaración de inconstitucionalidad del inc. 2 art. 12 LRT\n\n' +
+      '3. COMPARATIVA IBM (párrafo central):\n' +
+      '   "La fórmula utilizando tasa activa BNA desde [fecha accidente] arroja un IBM de $ [TASA] y una indemnización de $ [INDEM_A]; mientras que aplicando RIPTE, el IBM se elevaría a $ [RIPTE] y la indemnización alcanzaría $ [INDEM_B] (último RIPTE ' +
+      rfecha + ': $ ' + ripte + ' / RIPTE [mes accidente]: $ [X] / coeficiente: [Y] / IBM base × coef = $ [IBM RIPTE] / 53 × IBM × 65 ÷ edad × %)."\n\n' +
+      '4. CÁLCULO FINAL:\n' +
+      '   "Conforme arts. 6 y 14.2 ley 24.557, teniendo en cuenta la edad ([X] años) y la incapacidad ([X]%), la indemnización es: 53 × $ [IBM RIPTE] × 65 ÷ [edad] × [%]% = $ [MONTO]."\n' +
+      '   "Corresponde adicionar el 20% del art. 3 ley 26.773: $ [20%]."\n' +
+      '   "Total: $ [MONTO + 20%] (PESOS [EN LETRAS])."\n\n' +
+      '5. INTERESES: art. 770 CCC, tasa activa BNA 30 días desde mora hasta cancelación.\n\n' +
+      '6. ABSTRACTO INCONSTITUCIONALIDADES restantes.\n\n' +
+      '7. COSTAS: a cargo de la demandada vencida (art. 24 ley 15.057).\n\n' +
+      '8. Cerrá con: "Así lo voto (art. 57 inc. 4) ley 15.057)."\n\n' +
+      'NO incluyas adhesiones — solo el voto del primer juez.'
+  }
+
+  if (type === 'sentencia') {
+    const honActor = honorarios.actor ? `$ ${honorarios.actor}` : '[A COMPLETAR]'
+    const honDem = honorarios.dem ? `$ ${honorarios.dem}` : '[A COMPLETAR]'
+    const honPerito = honorarios.perito ? `$ ${honorarios.perito}` : '[A COMPLETAR]'
+    const honPsi = honorarios.tienePeritoPsi && honorarios.peritoPs ? `$ ${honorarios.peritoPs}` : null
+    const nombreActor = honorarios.actorNombre || '[LETRADO ACTOR]'
+    const nombreDem = honorarios.demNombre || '[LETRADO DEMANDADA]'
+
+    return REGLA +
+      'CONTEXTO — DATOS BÁSICOS:\n' + chunks.header.slice(0, 5000) + '\n\n' +
+      '--- FINAL DEL EXPEDIENTE ---\n' + chunks.final + '\n\n' +
+      'Redactá la SENTENCIA DISPOSITIVO completa (sin "S E N T E N C I A" ni el AUTOS Y VISTO, esos se agregan automáticamente).\n\n' +
+      'INCISOS EN ORDEN EXACTO:\n\n' +
+      '1°) Declarar la inconstitucionalidad del DNU 669/19 (art. 99 inc. 3° CN) y la inconstitucionalidad sobreviniente e inaplicabilidad al caso del inc. 2° del art. 12 ley 24.557 (por violentar arts. 14 bis, 17 y 33 CN).\n\n' +
+      '2°) HACER LUGAR a la demanda. Monto: LETRAS ($ NÚMERO). Plazo: 10 días de quedar firme. Nombre del/de la actor/a. Nombre de la demandada. Arts.: 6.1, 8.1 y 14.2.a ley 24.557, art. 12 ley 27.348, art. 3 ley 26.773. Incapacidad X% T.O. Arts. 345 CPCC y 89 ley 15.057.\n\n' +
+      '3°) INSTRUCCIONES CBU (texto íntegro obligatorio):\n' +
+      '"En atención a lo dispuesto por el art. 17 de la ley 27.348; el monto de condena, se abonará por la demandada obligada al pago, en forma directa en la cuenta bancaria sueldo –ley 26.590– del trabajador (actor). A tal fin, se debe adjuntar constancia de CBU del acreedor judicial e informar sus datos en el expediente: nombre y apellido completo, CBU, CUIT, DNI, número y tipo de cuenta, banco, sucursal y localidad, correo electrónico, en el cuerpo del escrito que presenten.\n' +
+      'Si el trabajador no contara con cuenta sueldo a su exclusiva titularidad –ley 26.590–, bajo juramento de decir verdad que no cuenta con la misma, podrá denunciar cualquier otra cuenta bancaria de la que sea único y exclusivo titular, no admitiéndose cuentas que contaren con otros titulares o, en su defecto, abrir a su exclusiva titularidad una cuenta gratuita en el Banco de la Provincia de Buenos Aires. (Cuenta DNI).\n' +
+      'Una vez que se cumpla lo indicado en el párrafo anterior, comenzará a correr el plazo impuesto en la sentencia para que el obligado realice el pago.\n' +
+      'La parte obligada al pago deberá acreditar en autos el debido cumplimiento de las obligaciones dinerarias impuestas dentro del mismo plazo que se dispone para que las abone."\n\n' +
+      '4°) INTERESES: art. 770 CCC, acumulación al capital, tasa activa BNA 30 días hasta cancelación efectiva.\n\n' +
+      '5°) COSTAS: a cargo de la demandada (art. 24 ley 15.057).\n\n' +
+      `6°) HONORARIOS:\n` +
+      `Letrado/a actor/a ${nombreActor}: ${honActor} (IUS según ac. 4200/25)\n` +
+      `Letrado/a demandada ${nombreDem}: ${honDem}\n` +
+      `Aportes previsionales 10% e IVA en caso de corresponder (arts. 2, 10, 13, 15, 16, 21, 23, 28, 29, 43, 51 y 54 ley 14.967).\n` +
+      `Perito médico Dr./Dra. [PERITO]: ${honPerito} + aportes ley 6.742 y decreto 1.845/64 + IVA.\n` +
+      (honPsi ? `Perito psiquiatra/psicólogo Dr./Dra. [PERITO PSI]: ${honPsi} + aportes + IVA.\n` : '') + '\n' +
+      '7°) INSTRUCCIONES PAGO HONORARIOS (texto íntegro):\n' +
+      '"Los honorarios se abonarán directamente en las cuentas bancarias de los profesionales (abogados y peritos), quienes deben adjuntar constancia de CBU y factura correspondiente e informar sus datos en el expediente: nombre y apellido completo, CBU, CUIT, DNI, número y tipo de cuenta, banco, sucursal y localidad, correo electrónico, en el cuerpo del escrito que presenten; conforme a las pautas que se especifican en: http://blogs.scba.gov.ar/tribunaltrabajo5quilmes/2020/08/12/solicitud-de-tranferencias/ (art. 12 ley 15.057).\n' +
+      'Una vez que se cumpla lo indicado en el párrafo anterior, comenzará a correr el plazo para que el obligado realice el pago.\n' +
+      'Asimismo, se hace saber que deberán acompañar los comprobantes de pago de aportes."\n\n' +
+      'REGISTRESE, NOTIFIQUESE, con transcripción de lo dispuesto en el art. 54 Ley 14.967 y oportunamente ARCHIVESE.\n\n' +
+      'TRANSCRIPCIÓN ART. 54 LEY 14.967 (texto íntegro):\n' +
+      '"ARTÍCULO 54.- Las providencias que regulen honorarios deberán ser notificadas personalmente, por cédula a sus beneficiarios, al mandante o patrocinado y al condenado en costas, si lo hubiere. Asimismo, será válida la notificación de la regulación de honorarios efectuada por cualquier otro medio fehaciente, a costa del interesado. Los honorarios a cargo del mandante o patrocinado quedarán firmes a su respecto si la notificación se hubiere practicado en su domicilio real y a la contraparte en su domicilio constituido. Habiendo cesado el patrocinio o apoderamiento y constituido el ex cliente nuevo domicilio, la notificación de honorarios a éste podrá ser efectuada en este último domicilio. En todos los casos, bajo pena de nulidad, en el instrumento de notificación que se utilice para ello, deberá transcribirse este artículo. Los honorarios regulados por trabajos judiciales deberán abonarse dentro de los diez (10) días de haber quedado firme el auto regulatorio. Los honorarios por trabajos extrajudiciales se abonarán dentro de los diez (10) días de intimado su pago, cuando sean exigibles. Operada la mora, el profesional podrá optar por: a) reclamar los honorarios expresados en la unidad arancelaria Jus prevista en esta ley, con más un interés del 12% anual. b) reclamar los honorarios regulados convertidos al momento de la mora en moneda de curso legal, con más el interés previsto en el artículo 552 del Código Civil y Comercial de la Nación."'
+  }
+
+  return ''
+}
+
+// Lee texto de un archivo Excel/PDF de remuneraciones (para procesar archivos extra)
+export async function extractExtraFileText(file) {
+  const ext = file.name.split('.').pop().toLowerCase()
+
+  if (ext === 'pdf') {
+    const result = await extractAllText(file)
+    return `[Archivo: ${file.name}]\n${result.fullText.slice(0, 10000)}`
+  }
+
+  if (ext === 'xlsx' || ext === 'xls') {
+    // Carga SheetJS dinámicamente
+    if (!window.XLSX) {
+      await new Promise((resolve, reject) => {
+        const s = document.createElement('script')
+        s.src = 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js'
+        s.onload = resolve
+        s.onerror = reject
+        document.head.appendChild(s)
+      })
+    }
+    const ab = await file.arrayBuffer()
+    const wb = window.XLSX.read(ab, { type: 'array' })
+    let text = `[Archivo: ${file.name}]\n`
+    wb.SheetNames.forEach(name => {
+      const sheet = wb.Sheets[name]
+      const csv = window.XLSX.utils.sheet_to_csv(sheet)
+      text += `\n--- Hoja: ${name} ---\n${csv.slice(0, 8000)}\n`
+    })
+    return text
+  }
+
+  return ''
 }
