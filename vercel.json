@@ -1,4 +1,4 @@
 {
   "rewrites": [{ "source": "/((?!api/).*)", "destination": "/index.html" }],
-  "functions": { "api/*.js": { "runtime": "edge" } }
+  "functions": { "api/generate.js": { "maxDuration": 60 } }
 }
