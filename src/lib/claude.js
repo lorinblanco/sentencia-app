@@ -116,7 +116,6 @@ export async function generateSentenceSection(apiKey, sectionName, prompt, exped
     content: `DATOS DEL EXPEDIENTE Y CONFIGURACIÓN:\n${contextJson.slice(0, 6000)}\n\n${prompt}`
   }], 6000)
 }
-}
 
 // ── Prompts for each section ──────────────────────────────────────────────────
 export function getPrompts(data, config) {
