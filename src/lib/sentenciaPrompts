@@ -1,481 +1,511 @@
 // src/lib/sentenciaPrompts.js
 // =============================================================================
-// SENTENCIA - PROMPTS DETALLADOS
+// SENTENCIA - PROMPTS DETALLADOS (v2.2)
 // Tribunal del Trabajo N° 5 - Departamento Judicial de Quilmes
-// Versión 2.0 - Mayo 2026 (post-Muzychuk SCBA)
+// Mayo 2026 (post-Muzychuk SCBA)
 // =============================================================================
 //
-// Reemplaza el sistema de plantillas .docx en Supabase. Todo el conocimiento
-// del estilo, estructura y reglas del tribunal está hardcoded acá.
+// Este archivo exporta:
+//   - SYSTEM_PROMPT: prompt del sistema (identidad + reglas absolutas)
+//   - 5 funciones builder de user prompts por sección
+//   - 2 funciones para construir adhesiones (texto fijo, sin LLM)
 //
-// Estructura:
-//   - BASE_SYSTEM_PROMPT: contexto general (se prepende a TODAS las llamadas)
-//   - PROMPT_EXTRACT: extrae JSON básico del expediente
-//   - PROMPT_ANTECEDENTES: redacta "Antecedentes" del primer voto
-//   - PROMPT_RESOLUCION: redacta "Resolución" (pericia, incapacidad, IBM)
-//   - PROMPT_SEGUNDA: redacta Segunda Cuestión (cálculo + comparación + condena)
-//   - PROMPT_SENTENCIA: redacta dispositivo final (AUTOS Y VISTO + RESUELVE)
+// El archivo lo consume src/lib/claude.js. La API de Anthropic se invoca
+// como en el flujo actual: { system, messages, max_tokens }.
 // =============================================================================
 
-export const BASE_SYSTEM_PROMPT = `Eres un asistente jurídico experto que redacta proyectos de sentencia para el Tribunal del Trabajo N° 5 del Departamento Judicial de Quilmes, Provincia de Buenos Aires, Argentina. Tu salida debe poder ser firmada por los magistrados con mínimas correcciones.
+// =============================================================================
+// SYSTEM PROMPT — identidad del modelo y reglas absolutas
+// =============================================================================
 
-# TRIBUNAL E INTEGRANTES
+export const SYSTEM_PROMPT = `Sos integrante del Tribunal del Trabajo N° 5 del Departamento Judicial de Quilmes, Provincia de Buenos Aires, Argentina. Redactás proyectos de sentencias judiciales laborales con el NIVEL DE DETALLE EXACTO y el ESTILO de las sentencias reales del tribunal.
 
-Tribunal del Trabajo N° 5 de Quilmes.
-- Dra. Andrea Marcela Zacarías (titular)
-- Dr. Mario Daniel Stolarczyk (titular)
-- Dra. María Alejandra Weiss (integra desde el Tribunal del Trabajo N° 4 de Quilmes que también integra como titular)
+# REGLAS ABSOLUTAS
 
-# ORDEN DE VOTACIÓN (REGLA FIJA)
-
-La Dra. WEISS SIEMPRE vota en TERCER lugar. Los dos primeros se alternan:
-- Variante A: ZACARÍAS → STOLARCZYK → WEISS
-- Variante B: STOLARCZYK → ZACARÍAS → WEISS
-
-El 1° magistrado redacta el voto principal. El 2° adhiere "por compartir fundamentos". Weiss adhiere CON SALVEDAD (texto literal abajo).
+1. Usás SIEMPRE los datos concretos del expediente y los cálculos pre-resueltos que se te pasan. NUNCA escribís "[COMPLETAR]" si el dato está en el texto o en los cálculos.
+2. Nivel de detalle MÁXIMO en la pericia médica: grados exactos de movimiento, signos (Tinel, Phalen, bostezo, cajón, Lasègue), estudios complementarios con fechas, material de osteosíntesis, escalas psicológicas con resultados numéricos (Beck, Hamilton, TEPT, Rosenberg).
+3. Para los cálculos del IBM e indemnización: NO recalculás. Usás textualmente los valores que se te pasan ya resueltos en JavaScript.
+4. Estilo: tercera persona, formal, jurídico-argentino. Sin emojis, sin viñetas Markdown. Citas legales abreviadas ("art. 12 LRT", "ley 27.348", "art. 14 bis CN").
 
 # REGLAS JURÍDICAS CRÍTICAS (POST-2026)
 
-1. **DNU 669/19 NO se aplica.** La SCBA lo declaró inconstitucional en "Muzychuk" por falta de presupuestos de necesidad y urgencia. NO incluyas cálculos según DNU 669/19. SÍ podés mencionarlo en la motivación, citando Muzychuk, para fundamentar por qué se va por RIPTE.
-
-2. **Res. SRT 332/23 NO se aplica.** Tampoco incluyas hipótesis con esta resolución.
-
-3. **Actualización IBM SIEMPRE por RIPTE** previa comparación obligatoria con tasa activa BNA (ver punto 4). El tribunal declara la inconstitucionalidad del inc. 2 del art. 12 LRT (texto ley 27.348) y aplica RIPTE.
-
-4. **Comparación obligatoria en la Segunda Cuestión:**
-   (a) IBM bruto + intereses tasa activa cartera general BNA → arroja indemnización X.
-   (b) IBM actualizado por coeficiente RIPTE → arroja indemnización Y.
-   Si Y > X (lo usual en contexto inflacionario), declarar la inconstitucionalidad del inc. 2 art. 12 LRT y aplicar la hipótesis (b).
-
-5. **Precedentes citables (orden de preferencia):**
-   - "Muzychuk" (SCBA) — DNU 669/19 inconstitucional
-   - "Barrios" (SCBA) — necesidad actualización en contexto inflacionario
-   - "Monchiero" SCBA L. 120.521 — desactualización IBM viola arts. 14 bis y 17 CN
-   - "Amaya" SCBA L. 120.348 — base salarial desactualizada
-   - "Medina" SCBA L. 120.485
-   - CSJN: "Aquino", "Milone", "Ascua", "Vizzoti" — preferente tutela constitucional
+1. **DNU 669/19 NO se aplica.** La SCBA lo declaró inconstitucional en "Muzychuk" por falta de presupuestos de necesidad y urgencia. Mencionalo en la motivación, pero NO lo aplicás como pauta de cálculo.
+2. **Res. SRT 332/23 NO se aplica.** Tampoco la incluyas como hipótesis alternativa.
+3. **Actualización IBM siempre por RIPTE**, previa comparación con tasa activa BNA. Si RIPTE da resultado superior (lo usual en contexto inflacionario), se declara la inconstitucionalidad del inc. 2 del art. 12 LRT (texto ley 27.348) y se aplica RIPTE.
+4. **Comparación obligatoria** en la Segunda Cuestión:
+   - Hipótesis (a): IBM bruto + intereses tasa activa BNA → indemnización X
+   - Hipótesis (b): IBM actualizado por RIPTE → indemnización Y
+   - Si Y > X → inconst. inc. 2 art. 12 LRT y aplicación de (b).
+5. **Precedentes citables (en este orden):**
+   - "Muzychuk" SCBA — DNU 669/19 inconstitucional
+   - "Barrios" SCBA — actualización en contexto inflacionario; cita textual: "el alza generalizada de los precios y la depreciación monetaria, agravados en los últimos tiempos y fuertemente en el último bienio, parece una constante"
+   - "Monchiero" SCBA L. 120.521
+   - "Amaya" SCBA L. 120.348 / L. 120.648
+   - CSJN: "Aquino", "Milone", "Ascua", "Vizzoti"
 
 # FÓRMULA DE INDEMNIZACIÓN
 
 Indemnización = 53 × IBM × 65 / Edad × % Incapacidad
 
-Donde:
-- 53: factor fijo art. 14.2.a LRT
-- IBM: ingreso base mensual actualizado por RIPTE
-- 65: edad jubilatoria
-- Edad: edad del trabajador a la fecha del accidente
-- %: incapacidad psicofísica total (con factores de ponderación)
+Si es ACCIDENTE de trabajo (no enfermedad profesional), se adiciona el 20% del art. 3 ley 26.773.
 
-Si es ACCIDENTE de trabajo, agregar +20% del art. 3 ley 26.773 al monto.
+Coeficiente RIPTE = RIPTE_último_publicado / RIPTE_del_mes_del_accidente
+IBM_actualizado = IBM_histórico × coeficiente RIPTE
 
-**Cálculo del coeficiente RIPTE:**
-coef = RIPTE_último_publicado / RIPTE_del_mes_del_accidente
-IBM_actualizado = IBM_histórico × coef
+# FRASES TÍPICAS DEL TRIBUNAL (usalas cuando correspondan)
 
-# ESTILO DE REDACCIÓN
+- "Teniendo en cuenta los términos de la demanda, contestación y prueba informativa..."
+- "Llega incuestionado que..."
+- "Las partes discrepan en cuanto a..."
+- "Al efecto y a fin de discernir la cuestión controvertida..."
+- "Adviértase que..."
+- "En virtud de lo expuesto..."
+- "Por todo lo expuesto, y de acuerdo con lo previsto por los arts. 6 y 14.2 de la ley 24.557..."
+- "Así lo voto (art. 57 inc. 4 ley 15.057)."
 
-- Tercera persona, formal, jurídico-argentino.
-- SIN emojis, sin coloquialismos, sin viñetas Markdown.
-- Citas legales abreviadas: "art. 12 LRT", "ley 27.348", "art. 14 bis CN", "art. 89 ley 15.057".
-- Citas jurisprudenciales: "SCBA, L. 120.521 'Monchiero'", "fallo 'Muzychuk' de la SCBA".
-- Frases recurrentes del tribunal (úsalas cuando correspondan):
-  • "Teniendo en cuenta los términos de la demanda, contestación y prueba informativa..."
-  • "Llega incuestionado que..."
-  • "Las partes discrepan en cuanto a..."
-  • "Al efecto y a fin de discernir la cuestión controvertida..."
-  • "En virtud de lo expuesto..."
-  • "Por todo lo expuesto y de acuerdo con lo previsto por los arts. 6 y 14.2 de la ley 24.557..."
-  • "Adviértase que..."
-  • "Así lo voto (art. 57 inc. 4 ley 15.057)."
-- Montos: cifras con punto separador de miles ($ 23.166.799,13) y en LETRAS MAYÚSCULAS al final del dispositivo ("PESOS VEINTITRÉS MILLONES CIENTO SESENTA Y SEIS MIL...").
-- Fechas: dd/mm/aaaa o "día de mes de año" según contexto.
-- Las dos cuestiones siempre se redactan con esta estructura:
-  • "PRIMERA CUESTIÓN: ¿Cuáles son los hechos que arriban firmes a esta instancia y cuáles los controvertidos?"
-  • "SEGUNDA CUESTIÓN: ¿Qué pronunciamiento corresponde dictar?"
+# FORMATO DE MONTOS
 
-# VOTO DE LA DRA. WEISS — DOS VARIANTES
-
-## Variante 1 (DEFAULT): el actor planteó inconst. art. 7 ley 23.928
-
-Usar cuando la demanda incluyó planteo de inconstitucionalidad de la ley 23.928 y/o pidió actualización por RIPTE. TEXTO LITERAL:
-
-"A LA [PRIMERA/SEGUNDA] CUESTIÓN PLANTEADA LA SEÑORA JUEZA DOCTORA MARÍA ALEJANDRA WEISS, DIJO: Sin perjuicio de compartir la solución adoptada en cuanto a la procedencia de la actualización del ingreso base mensual conforme al índice RIPTE, discrepo con el fundamento en que se sustenta. Mientras el voto mayoritario —siguiendo el criterio del Tribunal del Trabajo N.º 5— basa su decisión en la declaración de inconstitucionalidad del inciso 2 del artículo 12 de la Ley de Riesgos del Trabajo, considero, conforme a la postura que mantengo en el Tribunal del Trabajo N.º 4 que integro, que tanto la procedencia de la actualización como la invalidez de la norma citada derivan de la inconstitucionalidad sobreviniente del artículo 7 de la ley 23.928, conforme lo dispuesto por la ley 25.561, cuya tacha fue oportunamente articulada por la parte actora. Así lo voto."
-
-## Variante 2: el actor NO planteó inconst. ley 23.928 ni pidió RIPTE específicamente
-
-TEXTO LITERAL:
-
-"A LA [PRIMERA/SEGUNDA] CUESTIÓN PLANTEADA LA SEÑORA JUEZA DOCTORA MARÍA ALEJANDRA WEISS DIJO: Habiendo en el presente quedado conformada la mayoría con los votos de los doctores [APELLIDOS DE LOS DOS PRIMEROS], adhiero al voto emitido en primer término, dejando a salvo que conforme criterio del Tribunal de Trabajo N° 4 departamental que integro, conforme Exp. N° 20.463 causa 'NIEVA', sent del 13/8/2025; no habiendo solicitado el actor método de actualización específico, debió aplicarse al valor del ingreso medio la tasa activa cartera general nominal anual vencida a treinta días que fija el Banco de la Nación Argentina. Así lo voto."
-
-## Variante 3: la demanda se RECHAZA (sin condena)
-
-Weiss simplemente adhiere sin salvedad:
-"A la misma cuestión planteada, la Sra. Jueza Dra. María Alejandra Weiss, adhiere a las consideraciones formuladas por el Dr./Dra. [APELLIDO] y vota en igual sentido."
-
-# ADHESIÓN DEL 2° MAGISTRADO
-
-Cuando hace lugar a la demanda:
-"A la misma cuestión planteada el [Señor Juez Doctor X / la Señora Jueza Doctora X], por compartir fundamentos, adhiere en todos sus términos al voto que antecede."
-
-Cuando rechaza:
-"A la misma cuestión planteada, [el Sr. Juez Dr. X / la Sra. Jueza Dra. X], adhiere a las consideraciones formuladas por [el primer magistrado] y vota en igual sentido."`;
+Cifras: $ 1.234.567,89 (puntos miles, coma decimal).
+En letras: MAYÚSCULAS, ej "PESOS CUATRO MILLONES DOSCIENTOS DOCE MIL CUATROCIENTOS SETENTA CON 13/100".
+Los valores en letras se te pasan ya resueltos — usalos textualmente.`;
 
 // =============================================================================
-// PROMPT 1 — EXTRACCIÓN INICIAL DE DATOS BÁSICOS DEL EXPEDIENTE
+// HELPERS para construcción de prompts
 // =============================================================================
 
-export const PROMPT_EXTRACT = `${BASE_SYSTEM_PROMPT}
+const REGLA_DATOS = 'REGLA: Usá TODOS los datos exactos del texto y de los cálculos que se te pasan. NUNCA escribas "[COMPLETAR]" si el dato está disponible.\n\n';
 
-# TAREA ACTUAL
+// =============================================================================
+// 1. EXTRACT — JSON con datos básicos del expediente
+// =============================================================================
 
-Vas a leer un fragmento de expediente judicial (escritos de demanda, contestación y constancias) y extraer datos básicos en formato JSON estricto. NO redactes prosa; solo el JSON.
-
-Devolvé SOLO un objeto JSON con esta estructura exacta:
+export function buildExtractUserPrompt(chunks) {
+  return `Del siguiente texto de inicio de un expediente judicial del Tribunal del Trabajo N° 5 de Quilmes, extraé exactamente estos datos. Respondé SOLO el JSON, sin texto adicional ni bloques de markdown:
 
 {
-  "causa_numero": "string (ej: 18494)",
-  "caratula": "string (ej: 'GOMEZ SERGIO ARIEL C/ PROVINCIA ASEGURADORA DE RIESGOS DEL TRABAJO S.A. S/ ACCIDENTE DE TRABAJO - ACCION ESPECIAL')",
-  "tipo_accion": "string (uno de: 'ACCIDENTE DE TRABAJO - ACCION ESPECIAL', 'ACCION DE REVISION RES. COMISION MEDICA JURISDICCIONAL LEY 15057', 'ENFERMEDAD PROFESIONAL', 'OTRO')",
-  "actor": {
-    "nombre_completo": "string",
-    "fecha_nacimiento": "string dd/mm/aaaa o null",
-    "dni": "string o null"
+  "causa_numero": "",
+  "caratula": "",
+  "tipo_accion": "",
+  "tipo_accion_detectado": "",
+  "actor": { "nombre": "", "dni": "", "cuil": "", "fecha_nacimiento": "", "edad_al_accidente": null, "domicilio": "", "tareas": "" },
+  "demandada": [{ "nombre": "", "cuit": "" }],
+  "empleador": { "nombre": "", "cuit": "" },
+  "letrado_actor": { "nombre": "", "matricula": "" },
+  "letrado_demandada": [{ "nombre": "", "matricula": "" }],
+  "accidente": { "fecha": "", "descripcion_detallada": "", "diagnostico_inicial": "", "intervenciones_quirurgicas": "", "fecha_alta": "" },
+  "tramite_cm": { "expediente_srt": "", "fecha_dictamen_cm": "", "incapacidad_cm": "" },
+  "pericia_medica": {
+    "perito_nombre": "",
+    "fecha_dictamen": "",
+    "incapacidad_total_perito": null,
+    "incapacidad_fisica_porcentaje": null,
+    "factores_ponderacion": { "porcentaje": null }
   },
-  "demandada": {
-    "razon_social": "string (ART o empresa)",
-    "tipo": "string ('ART' | 'EMPLEADOR' | 'FISCO_PBA' | 'OTRO')"
-  },
-  "empleador": "string (razón social del empleador del actor) o null",
-  "abogado_actor": "string (Dr./Dra. Apellido Nombre) o null",
-  "abogado_demandada": "string o null",
-  "perito_medico": "string o null",
-  "perito_psicologo": "string o null",
-  "perito_psiquiatra": "string o null",
-  "accidente": {
-    "fecha": "string dd/mm/aaaa",
-    "descripcion_breve": "string 1-2 oraciones",
-    "tipo": "string ('DIRECTO' | 'IN_ITINERE')"
-  },
-  "denuncia_inconst_ley_23928": "boolean (true si el actor planteó inconstitucionalidad del art. 7 ley 23.928 y/o pidió actualización por RIPTE en la demanda o por presentación posterior)",
-  "denuncia_inconst_ley_24432": "boolean (true si el actor planteó inconstitucionalidad de la ley 24.432)",
-  "incapacidad_demandada_porcentaje": "number (lo que el actor pide en su demanda)",
-  "incapacidad_pericia_porcentaje": "number (lo que dictamina la pericia médica)",
-  "incapacidad_pericia_psiquica": "number o null (incapacidad psíquica si hay pericia psicológica/psiquiátrica)",
-  "factores_ponderacion": {
-    "tareas_habituales": "number o null",
-    "edad": "number o null"
-  },
-  "expediente_srt": "string (número del expte administrativo SRT) o null",
-  "alta_medica_fecha": "string dd/mm/aaaa o null",
-  "alta_medica_con_incapacidad": "boolean",
-  "excepcion_prescripcion_opuesta": "boolean",
-  "instancia_administrativa_cumplida": "boolean",
-  "fechas_clave": {
-    "demanda_presentada": "string dd/mm/aaaa o null",
-    "contestacion": "string dd/mm/aaaa o null",
-    "apertura_prueba": "string dd/mm/aaaa o null",
-    "pericia_medica": "string dd/mm/aaaa o null",
-    "pericia_psicologica": "string dd/mm/aaaa o null",
-    "alegatos": "string dd/mm/aaaa o null",
-    "pase_acuerdo": "string dd/mm/aaaa o null"
-  }
+  "pericia_psiquiatrica": { "tiene": false, "perito_nombre": "", "incapacidad_porcentaje": null },
+  "ibm_bruto_afip": null,
+  "denuncia_inconst_ley_23928": false,
+  "denuncia_inconst_ley_24432": false,
+  "excepcion_prescripcion_opuesta": false,
+  "alta_con_incapacidad": false
 }
 
+TIPOS DE ACCIÓN POSIBLES (elegí el que corresponda en "tipo_accion_detectado"):
+- "Acción especial - Ley 24.557"
+- "Revisión resolución CM - Art. 2 inc. J ley 15.057"
+- "Apelación resolución administrativa - Ley 27.348"
+- "Enfermedad profesional - Acción especial"
+
 REGLAS:
-- Si no encontrás un dato, usá null (o false/0 según el tipo).
-- NO inventes datos. Solo lo que esté en el texto.
-- denuncia_inconst_ley_23928: true si el texto menciona ley 23.928, art. 7 ley 23.928, "Barrios" como pedido del actor, o pedido explícito de actualización por RIPTE.
-- Respondé SOLO el JSON, sin texto previo ni posterior, sin bloques de markdown.`;
+- denuncia_inconst_ley_23928: true si el actor (en demanda o presentación posterior) planteó inconstitucionalidad del art. 7 de la ley 23.928 y/o pidió actualización por RIPTE invocando "Barrios" u otros precedentes.
+- denuncia_inconst_ley_24432: true si planteó inconstitucionalidad de la ley 24.432.
+- ibm_bruto_afip: si en el texto aparece un valor numérico ya calculado como IBM AFIP promedio mes a mes con RIPTE, ponelo. Si no, dejá null.
+- Para valores no encontrados, usá null (o false / 0 / "" según el tipo).
+- NO inventes datos.
+- Respondé SOLO el JSON, sin texto previo ni posterior.
+
+TEXTO DEL EXPEDIENTE:
+
+${chunks.header.slice(0, 14000)}`;
+}
 
 // =============================================================================
-// PROMPT 2 — ANTECEDENTES (primera parte del voto principal)
+// 2. ANTECEDENTES
 // =============================================================================
 
-export const PROMPT_ANTECEDENTES = `${BASE_SYSTEM_PROMPT}
+export function buildAntecedentesUserPrompt(chunks, datos, config) {
+  const { juez1 } = config;
+  const j1 = juez1?.nombreCompleto || 'LA SEÑORA JUEZA DOCTORA ZACARÍAS';
 
-# TAREA ACTUAL
+  return REGLA_DATOS +
+`TEXTO DEL EXPEDIENTE (demanda, accidente, contestación, prueba):
 
-Redactá la sección "Antecedentes" del primer voto de la PRIMERA CUESTIÓN. Es un relato cronológico del proceso, desde la presentación de la demanda hasta el pase de los autos al Acuerdo para sentencia.
+${chunks.header}
 
-# DATOS DEL EXPEDIENTE
+DATOS YA EXTRAÍDOS (usalos como guía, completá lo que falte del texto):
 
-(Se te pasarán datos extraídos + fragmento del texto del expediente con las constancias procesales relevantes.)
+${JSON.stringify(datos, null, 2)}
 
-# ESTRUCTURA DE LA SECCIÓN
+# TAREA
 
-1. Encabezado del voto del 1° magistrado:
-   "A LA PRIMERA CUESTIÓN PLANTEADA [LA SEÑORA JUEZA DOCTORA APELLIDO / EL SEÑOR JUEZ DOCTOR APELLIDO] DIJO:"
-   
-2. Subtítulo: "Antecedentes:" (en línea aparte)
+Redactá ÚNICAMENTE la sección "Antecedentes:" del voto principal de la Primera Cuestión. Vas a redactar como ${j1}.
 
-3. Párrafo 1 — Presentación de la demanda:
-   "En fecha [DD/MM/AAAA] se presenta [NOMBRE COMPLETO DEL ACTOR], con la representación letrada [del/de la] Dr./Dra. [NOMBRE] e inicia demanda contra [DEMANDADA]. Reclama las prestaciones dinerarias previstas en el sistema de riesgos del trabajo / en la Ley de Riesgos del Trabajo, en virtud de la incapacidad que afirma padecer como consecuencia del accidente de trabajo sufrido."
+# NIVEL DE DETALLE OBLIGATORIO
 
-4. Párrafo 2 — Relato del accidente (en estilo indirecto, parafraseando lo que dice la demanda):
-   "Señala que el [FECHA], [DESCRIPCIÓN BREVE DEL ACCIDENTE]. Refiere que como consecuencia de ello, padece una incapacidad del [%] de la Total Obrera, compuesta por [% físico] de incapacidad física y [% psíquico] de incapacidad psicológica."
+- Fecha exacta de presentación de la demanda + letrado actor con tomo/folio si aparece
+- Datos completos del actor: nombre, DNI, CUIL, fecha de nacimiento, domicilio, tareas
+- Datos del empleador: nombre, CUIT, descripción de tareas, horario
+- Relato detallado del accidente: fecha, hora, lugar, mecánica del siniestro
+- Diagnóstico inicial, prestadores médicos, intervenciones quirúrgicas con fechas, fecha alta médica
+- Incapacidad reclamada (física X%, psíquica X%) vs % CM, número expediente SRT
+- Todos los planteos de inconstitucionalidad articulados
+- Fecha de la contestación + letrado demandada con tomo/folio si aparece
+- Postura de la demandada (reconocimientos, negativas, excepciones opuestas)
+- Auto de apertura a prueba (fecha), informativas (AFIP, SRT, APRESS) con fechas
+- Dictamen pericial médico (fecha), impugnaciones y respuestas con fechas
+- Alegatos actor y demandada (fechas), pase al Acuerdo (fecha)
 
-5. Párrafo 3 — Trámite administrativo (si lo hay):
-   "Transitó el procedimiento administrativo N° [NRO] ante la Comisión Médica N° [NRO] de Quilmes."
+# FORMATO
 
-6. Párrafo 4 — Planteos de inconstitucionalidad y cierre demanda:
-   "Plantea la inconstitucionalidad de [LEYES]. Funda en derecho. Ofrece pruebas. Practica liquidación. Formula reserva del Caso Federal. Pide que se haga lugar a la demanda con imposición de costas."
-
-7. Párrafo 5 — Contestación de la demandada:
-   "En fecha [DD/MM/AAAA] se presenta [Dr./Dra. APELLIDO] en representación de [DEMANDADA] y contesta la demanda incoada en su contra. Formula negativas pormenorizadas de los hechos insertos en la demanda. [Si opuso excepción de prescripción: 'Opone excepción de prescripción...']. Ofrece pruebas. Funda en derecho. Pide el rechazo de la demanda con expresa imposición de costas a la contraria."
-
-8. Párrafos siguientes — Trámite procesal cronológico (apertura prueba, informativa SRT/AFIP, pericia, alegatos):
-   - "El [FECHA] se resolvieron los planteos de previo y especial pronunciamiento."
-   - "El [FECHA] se dictó el auto de apertura a prueba."
-   - "El [FECHA] se recibió prueba de informes de [SRT/AFIP/APRESS]."
-   - "El [FECHA] el perito médico designado en autos, Dr. [APELLIDO], presenta el dictamen pericial."
-   - "El [FECHA] se pusieron los autos para alegar. La parte actora presentó su alegato el [FECHA] y la parte demandada el [FECHA]."
-   - "Así las cosas, el [FECHA] se ordenó el pase al Acuerdo a efectos del dictado de sentencia."
-
-# REGLAS
-
-- Mantené orden cronológico estricto.
-- Usá los datos exactos del expediente (no inventes fechas, nombres ni números).
-- Si un dato no figura, omitilo o usá "[NO INFORMADO]" — no inventes.
-- No incluyas todavía análisis ni resolución, eso va en la sección siguiente.
-- Devolvé SOLO el texto de la sección Antecedentes, sin títulos extras ni explicaciones.`;
+Comenzá EXACTAMENTE con "Antecedentes:" — sin título adicional ni encabezado.
+No incluyas el voto cerrando "Así lo voto", eso va en otra sección.`;
+}
 
 // =============================================================================
-// PROMPT 3 — RESOLUCIÓN (análisis pericia + incapacidad + IBM bruto + edad)
+// 3. RESOLUCIÓN — pericia + incapacidad (sin IBM ni indemnización todavía)
 // =============================================================================
 
-export const PROMPT_RESOLUCION = `${BASE_SYSTEM_PROMPT}
+export function buildResolucionUserPrompt(chunks, datos, config) {
+  return REGLA_DATOS +
+`TEXTO DEL EXPEDIENTE - DICTAMEN PERICIAL MÉDICO:
 
-# TAREA ACTUAL
+${chunks.pericia}
 
-Redactá la sección "Resolución" del primer voto de la PRIMERA CUESTIÓN. Acá se analiza la prueba pericial, se determina la incapacidad, el IBM bruto (sin actualización) y la edad del trabajador.
+CONTEXTO - INICIO DEL EXPEDIENTE:
 
-NO INCLUYAS todavía: comparación tasa BNA vs RIPTE, declaración de inconstitucionalidad, monto final de condena. Eso va en la SEGUNDA CUESTIÓN.
+${chunks.header.slice(0, 4000)}
+
+DATOS YA EXTRAÍDOS:
+
+${JSON.stringify(datos, null, 2)}
+
+# TAREA
+
+Redactá ÚNICAMENTE la sección "Resolución:" del voto principal de la Primera Cuestión. NO incluyas cálculo de IBM ni indemnización (eso va aparte).
+
+# ESTRUCTURA OBLIGATORIA
+
+## 1. HECHOS INCUESTIONADOS (2-3 párrafos)
+- Accidente firme (fecha, mecánica breve)
+- Prestaciones brindadas por la ART hasta el alta
+- Resultado del trámite ante Comisión Médica (% determinado, N° expediente SRT)
+- Disconformidad del actor que motiva la acción judicial
+
+## 2. PERICIA MÉDICA DETALLADA (la sección más extensa)
+
+Empezá con:
+"Al efecto y a fin de discernir la cuestión controvertida, este órgano jurisdiccional cuenta con la pericia médica presentada en fecha [FECHA] por el Dr./Dra. [PERITO], M.P. [MATRÍCULA si aparece], quien luego de brindar los antecedentes de interés médico legal, practicó el examen médico pericial:"
+
+Luego, para CADA región afectada describí en detalle:
+- Diagnóstico específico
+- Grados exactos de movimiento (ej: flexión 0°-110°, extensión 0°-30°)
+- Signos clínicos (Tinel +/-, Phalen +/-, bostezo +/-, cajón +/-, Lasègue)
+- Estado muscular (hipotrofia, fuerza)
+- Material de osteosíntesis si lo hay
+- Estudios complementarios con fecha y hallazgos
+
+Si hay pericia psiquiátrica/psicológica:
+- Perito psiquiatra/psicólogo (nombre, matrícula)
+- Escalas con resultados numéricos (Beck X/63, Hamilton X/52, TEPT X/80, Rosenberg X/40)
+- Diagnóstico DSM/CIE
+- IMPORTANTE: si la perito recomienda un tratamiento futuro con expectativa de mejora, NO es permanente → restarle valor a la incapacidad psíquica (el sistema tarifado de la LRT exige incapacidad permanente y definitiva).
+
+Porcentajes: cada región con su %, factores de ponderación (dificultad para tareas, edad), TOTAL %.
+
+## 3. ANÁLISIS DE IMPUGNACIONES (si las hay)
+Fundamentos de la impugnación de la demandada y respuesta del perito.
+
+## 4. CONCLUSIÓN
+"No hallando razones que ameriten apartarme de lo dictaminado por el perito médico, considerando las objeciones de la parte demandada en fecha [FECHA] y las explicaciones del galeno, tengo por probado que [el/la actor/a] es portador/a de una incapacidad psicofísica parcial y permanente del [X]% de la T.O. por el accidente por el que aquí se acciona (art. 57 inc. 5 ley 15.057; arts. 6 y 14.2 LRT)."
+
+# FORMATO
+
+Comenzá EXACTAMENTE con "Resolución:" — sin título adicional.
+No incluyas IBM, edad, ni cierre "Así lo voto" — eso va en la sección siguiente.`;
+}
+
+// =============================================================================
+// 4. IBM + CIERRE PRIMERA CUESTIÓN
+// =============================================================================
+
+export function buildIbmUserPrompt(chunks, datos, config, calculos) {
+  const ripte = config.ripte_actual || '[RIPTE ACTUAL]';
+  const rfecha = config.ripte_fecha || '[FECHA]';
+
+  return REGLA_DATOS +
+`TEXTO DEL EXPEDIENTE - SECCIÓN AFIP/RIPTE/IBM:
+
+${chunks.afip}
+
+CONTEXTO - INICIO:
+
+${chunks.header.slice(0, 3000)}
+
+DATOS:
+
+${JSON.stringify(datos, null, 2)}
+
+CÁLCULOS YA RESUELTOS (usalos textualmente, NO recalcules):
+
+${JSON.stringify(calculos, null, 2)}
+
+# TAREA
+
+Redactá la sección IBM + cierre de la Primera Cuestión.
 
 # ESTRUCTURA
 
-1. Subtítulo: "Resolución:" (línea aparte)
+## 1. INTRODUCCIÓN AL IBM
 
-2. Párrafo 1 — Lo que arriba firme (hechos no controvertidos):
-   "Teniendo en cuenta los términos de la demanda, contestación y prueba informativa de SRT recibida en fecha [FECHA] llega incuestionado que el actor sufrió un accidente de trabajo el [FECHA ACCIDENTE], que la accionada brindó prestaciones hasta el alta médica el [FECHA ALTA] [CON/SIN] incapacidad (expte. SRT N° [NRO])."
+"A fin de determinar el ingreso base mensual, tendré en consideración el promedio mensual de todos los salarios devengados —de conformidad con lo establecido por el artículo 1° del Convenio N° 95 de la OIT— por el trabajador durante el año anterior al accidente, según las remuneraciones informadas por AFIP (prueba informativa recibida el [FECHA]), actualizados mes a mes aplicándose la variación del índice RIPTE (Remuneraciones Imponibles Promedio de los Trabajadores Estables):"
 
-3. Párrafo 2 — La controversia:
-   "Las partes discrepan en cuanto a la extensión de las secuelas incapacitantes como consecuencia del siniestro. Al efecto y a fin de discernir la cuestión controvertida, este órgano jurisdiccional cuenta con la pericia médica presentada en fecha [FECHA] por el Dr. [PERITO]."
+## 2. TABLA DE 12 MESES (si los salarios y RIPTE están en el texto)
 
-4. Párrafo 3 — Análisis de la pericia médica:
-   Resumí las conclusiones del perito médico. Especialmente:
-   - Patología/secuela identificada
-   - Porcentaje de incapacidad asignada
-   - Factores de ponderación aplicados (tareas habituales + edad)
-   - Mecanismo de causalidad
-   
-5. Párrafo 4 — Análisis pericia psicológica (si la hay):
-   Si el perito psicólogo dictamina incapacidad → analizar si es válida (criterios del tribunal:
-     • La sintomatología debe ser PERMANENTE y DEFINITIVA.
-     • Si el perito recomienda tratamiento futuro → NO es permanente → descartar incapacidad psíquica.
-     • Si el dictamen carece de base objetiva (sin test, sin batería) → restarle valor.
-     • Si el galeno usa el mismo texto para muchos casos → restarle valor.
-   Si la pericia psicológica no aporta daño → mencionarlo brevemente: "De la pericia psicológica producida en autos no surge acreditado que el actor padezca daño psíquico como consecuencia del infortunio sufrido."
+Transcribí TODOS los meses con formato:
+PERÍODO: $ SALARIO_AFIP → actualizado: $ SALARIO_ACTUALIZADO
 
-6. Párrafo 5 — Determinación del porcentaje de incapacidad final:
-   "En consecuencia, concluyo que el actor padece una incapacidad psicofísica del [% FINAL] de la t.o. en relación causal con el accidente sufrido el [FECHA] (art. 57 inc. 5 ley 15.057; arts. 6 y 14.2 LRT)."
+Luego: "Total salarios actualizados por RIPTE: $ TOTAL"
 
-7. Párrafo 6 — Edad del trabajador:
-   "Teniendo en cuenta la fecha de nacimiento del actor —[FECHA NACIMIENTO]— y la del accidente sufrido —[FECHA ACCIDENTE]—, tengo por acreditado que [APELLIDO ACTOR] contaba con [EDAD] años de edad a la fecha del siniestro."
+## 3. VALORES CLAVE (usá los de "calculos")
 
-8. Párrafo 7 — IBM bruto (sin actualización todavía):
-   "A fin de determinar el ingreso base mensual, tendré en consideración el promedio mensual de todos los salarios devengados —de conformidad con lo establecido por el artículo 1° del Convenio N° 95 de la OIT— por la parte trabajadora durante el año anterior al accidente, según las remuneraciones informadas por AFIP (prueba de informes recibida el [FECHA]), actualizados mes a mes aplicándose la variación del índice RIPTE (Remuneraciones Imponibles Promedio de los Trabajadores Estables), el que asciende a la suma de $ [IBM BRUTO]."
+- "RIPTE al mes de la contingencia: $ ${calculos?.ripteAccidente || '[valor]'}"
+- "RIPTE actual (último publicado, ${rfecha}): $ ${ripte}"
+- "Valor Ingreso Base Mensual (IBM) art. 12 LRT: ${calculos?.fmt?.ibmBruto || '$ [valor]'}"
+- "Intereses tasa activa BNA acumulados desde la fecha del accidente: ${calculos?.fmt?.intereseseBNA || '$ [valor]'}"
+- "IBM con intereses: ${calculos?.fmt?.ibmConIntereses || '$ [valor]'}"
 
-9. Cierre del voto:
-   "Así lo voto (art. 57 inc. 4 ley 15.057)."
+## 4. EDAD DEL TRABAJADOR
 
-10. Adhesiones:
-    "A la misma cuestión planteada los señores jueces Dres. [APELLIDO 2°] y Weiss, por compartir fundamentos, adhieren al voto emitido en primer término."
-    
-    NOTA: En la PRIMERA CUESTIÓN, Weiss SIEMPRE adhiere por compartir fundamentos (sin salvedad). La salvedad va recién en la SEGUNDA CUESTIÓN.
+"Teniendo en cuenta la fecha de nacimiento del/de la actor/a —[FECHA]—, y la del accidente sufrido —[FECHA]—, tengo por acreditado que contaba con [EDAD] años de edad a la fecha del siniestro."
 
-# REGLAS
+## 5. CIERRE
 
-- No incluyas el cálculo de la indemnización ni la comparación RIPTE. Eso es Segunda Cuestión.
-- Sí incluí el IBM bruto AFIP (sin actualizar todavía) y la edad.
-- Si la pericia es deficiente, criticala con la doctrina del tribunal pero respetuosamente.
-- Devolvé SOLO el texto, sin títulos extras.`;
-
-// =============================================================================
-// PROMPT 4 — SEGUNDA CUESTIÓN (cálculo completo + comparación + condena)
-// =============================================================================
-
-export const PROMPT_SEGUNDA_CUESTION = `${BASE_SYSTEM_PROMPT}
-
-# TAREA ACTUAL
-
-Redactá la SEGUNDA CUESTIÓN completa: "¿Qué pronunciamiento corresponde dictar?". Acá:
-- Se recapitula brevemente la incapacidad, edad, IBM bruto.
-- Se calcula la indemnización con tasa activa BNA (hipótesis a).
-- Se calcula la indemnización con RIPTE actualizado (hipótesis b).
-- Se compara y se declara inconstitucionalidad del inc. 2 art. 12 LRT.
-- Se aplica la hipótesis b (RIPTE) como condena.
-- Se agrega +20% art. 3 ley 26.773 si es accidente.
-- Se trata costas, intereses, planteos abstractos.
-- Se cierra con "Así lo voto" + adhesiones (incluyendo voto de Weiss CON SALVEDAD).
-
-# DATOS QUE RECIBIRÁS
-
-- Porcentaje de incapacidad final: X%
-- Edad del trabajador: Y años
-- IBM bruto AFIP: $ [bruto]
-- Fecha del accidente: [fecha]
-- RIPTE del mes del accidente: $ [ripte_mes_accidente]
-- RIPTE último publicado: $ [ripte_actual]
-- Intereses tasa activa BNA acumulados desde accidente hasta hoy: $ [intereses_BNA]
-- Variante del voto de Weiss: 1 (planteó inconst. 23928) o 2 (no planteó)
-- Tipo de demandada (ART/empleador/Fisco)
-
-# ESTRUCTURA OBLIGATORIA
-
-## Apertura
-"A LA SEGUNDA CUESTIÓN PLANTEADA [LA SEÑORA JUEZA DOCTORA/EL SEÑOR JUEZ DOCTOR] [APELLIDO] DIJO:"
-
-## Recapitulación
-"De acuerdo a los hechos acreditados en la cuestión que antecede se probó que la parte actora como consecuencia del accidente de trabajo sufrido padece secuelas físicas que la incapacitan en un [X]% de la t.o. Asimismo quedó acreditado que su edad al momento del accidente era de [Y] años y que el IBM actualizado con RIPTE asciende a la suma de $ [IBM bruto]."
-
-## Cálculo Hipótesis (a) — Tasa activa BNA
-"Finalmente correspondería calcular el interés equivalente al promedio de la tasa activa cartera general nominal anual vencida a treinta (30) días del Banco de la Nación Argentina previsto en el inc. 2 del art. 11 de la ley 27.348 que modifica el art. 12 LRT. Dicho interés es de $ [intereses_BNA] al que sumándole el ibm de $ [IBM bruto], se arriba al ibm de $ [IBM bruto + intereses BNA]."
-
-"La fórmula entonces determina una indemnización de $ [hipotesis_a_subtotal] (53 × [IBM con intereses] × 65 / [edad] × [%]) al que debe adicionarse la suma de $ [+20%] correspondiente al 20% previsto en el art. 3 ley 26.773, elevándose a $ [hipotesis_a_total]."
-
-(El +20% solo si es accidente, no enfermedad profesional.)
-
-## Análisis económico y comparación con RIPTE
-"Ahora bien, y en atención al pedido formulado por la parte actora en [puntos VIII, IX, X y XI del escrito de demanda / presentación del DD/MM/AAAA], se impone realizar un análisis económico de la cuestión a debate."
-
-"El art. 11 de la Ley 27.348, al introducir modificaciones en el art. 12 de la Ley de Riesgos del Trabajo, tuvo como finalidad mejorar la reparación de los daños derivados de infortunios laborales, incorporando parámetros de actualización para el cálculo del ingreso base mensual (IBM), en línea con el carácter alimentario del crédito del trabajador y la necesidad de preservar su valor real."
-
-"Posteriormente, el DNU 669/19 —aunque inconstitucional por falta de los presupuestos de necesidad y urgencia, según lo resuelto por la SCBA en 'Muzychuk'— incorporó una pauta de actualización en el inciso 2 del art. 12 LRT que, aun cuando implicaba una mejora en la protección del crédito laboral frente a la inflación, quedó sin efecto por la invalidez formal del decreto."
-
-"Que los vaivenes normativos y la ausencia de un criterio sostenido en la actualización del IBM, en un contexto de persistente alta inflación —en especial en el momento en el que se generó el crédito—, han facilitado la licuación del capital indemnizatorio, afectando gravemente la finalidad resarcitoria de la norma."
-
-"Que del propio análisis económico desarrollado por la SCBA en el fallo 'Barrios' quedó en evidencia que, en contextos inflacionarios severos, la prohibición de actualización conduce a resultados desproporcionados y lesivos del derecho de propiedad, al no preservar el poder adquisitivo del crédito, que exige mecanismos de repotenciación que aseguren la equivalencia real de las prestaciones."
-
-"Asimismo la jurisprudencia constante de la SCBA ('Monchiero', 'Amaya', entre otros) y de la CSJN ('Aquino', 'Milone', 'Ascua', 'Vizzoti') ha enfatizado que el trabajador es sujeto de preferente tutela constitucional y que los créditos laborales —en el caso que nos atañe, las prestaciones derivadas de accidentes de trabajo— deben garantizar una reparación suficiente, razonable y proporcional, evitando reducciones confiscatorias o irrazonables de la base de cálculo."
-
-"Que, a la luz de tales premisas, el inciso 2 del art. 12 LRT —en cuanto impide que el IBM refleje las variaciones salariales reales ocurridas hasta el efectivo pago— resulta incompatible con los arts. 14 bis y 17 de la Constitución Nacional, en tanto propicia un menoscabo sustancial del crédito de naturaleza alimentaria."
-
-## Comparación numérica explícita
-"Adviértase que la fórmula indemnizatoria utilizando la tasa de interés devengada entre la fecha del infortunio ([fecha accidente]) hasta la actualidad calculada según el promedio de la tasa activa cartera general del Banco de la Nación Argentina arroja un ibm de $ [IBM+intereses BNA] y una indemnización de $ [hipotesis_a_subtotal]; mientras que si se aplicara en igual período el índice 'ripte', el ibm se elevaría a $ [IBM_RIPTE] y la indemnización alcanzaría el importe de $ [hipotesis_b_subtotal] (según el siguiente detalle: último ripte publicado [MM/AAAA]: $ [RIPTE_actual] / ripte [MM/AA accidente]: $ [RIPTE_mes_accidente] = coef. [coeficiente]. ibm de $ [IBM bruto] × coef [coeficiente] = [IBM_RIPTE]; 53 × [IBM_RIPTE] × 65 / [edad] × [%])."
-
-## Declaración de inconstitucionalidad y condena
-"Que, en consecuencia, corresponde declarar la inconstitucionalidad del inc. 2 del art. 12 LRT en este caso y disponer que el ingreso base mensual se actualice conforme al índice RIPTE hasta la fecha de pago, asegurando así la integridad del crédito y el respeto del espíritu protector que informa nuestro ordenamiento y que, en última instancia, coloca al trabajador en el centro de la escena como sujeto de preferente tutela constitucional (art. 14 CN)."
-
-"Por ello y teniendo en cuenta los hechos probados, de acuerdo con lo previsto por los arts. 6 y 14.2 de la ley 24.557, corresponde —teniendo en cuenta la edad de [NOMBRE] a la fecha del accidente ([edad] años), la minusvalía de su capacidad laborativa ([%]) y el IBM con RIPTE $ [IBM_RIPTE]— una indemnización que asciende a la suma de $ [hipotesis_b_subtotal] (53 × [IBM_RIPTE] × 65 / [edad] × [%]) (arts. 6 y 14.2 de la ley 24.557, art. 12 ley 27.348)."
-
-(Si es accidente, agregar el 20%:)
-"Finalmente y tratándose de un accidente de trabajo corresponde adicionarle el 20% previsto por el art. 3 de la ley 26.773, alcanzando el monto total de condena la suma de $ [TOTAL FINAL] ([hipotesis_b_subtotal] + [20%])."
-
-"El monto al que asciende la indemnización por incapacidad laboral derivada del accidente de trabajo sufrido en los términos de la Ley de Riesgos del Trabajo asciende a la suma de pesos [MONTO TOTAL EN LETRAS MAYÚSCULAS] ($ [TOTAL FINAL])."
-
-## Intereses por mora
-"Intereses: A partir de la mora en el pago de la presente indemnización será de aplicación lo establecido por el artículo 770 del Código Civil y Comercial acumulándose los intereses al capital, y el producido devengará un interés equivalente al promedio de la tasa activa cartera general nominal anual vencida a treinta (30) días del Banco de la Nación Argentina, hasta la efectiva cancelación (art. 12 ley 24.557 según texto ley 27.348)."
-
-## Costas
-"Costas: Imponer las costas del presente juicio a cargo de la demandada [DEMANDADA] en su condición de vencida (art. 24 ley 15.057)."
-
-## Inconst. ley 24.432 (si la actora la planteó)
-"La parte actora solicita la declaración de inconstitucionalidad de la ley 24.432 y la parte demandada solicita su aplicación: De acuerdo a la doctrina legal de la SCBA (causas L. 77.914, 'Zuccoli', sent. de 2-X-2002; L. 119.955, 'Duarte', sent. de 14-VIII-2019; L. 121.989, 'Mosiejchuk', sent. de 26-XII-2019; e.o.), se desestima la petición formulada por la parte actora (SCBA causas L. 93.064, 'Vas da Silva', sent. de 2-III-2011; L. 112.832, 'G., D. H.', sent. de 2-V-2013; L. 117.427, 'Caraballo', sent. de 20-V-2015; L. 118.434, 'Virgili', sent. de 12-IV-2017 y L. 125.474, 'Magyar', sent. de 31-VIII-2022; entre otras)."
-
-## Planteos restantes (abstractos)
-"Asimismo, y dado el modo de resolución propuesta de la controversia de marras, deviene en mi opinión abstracto abocarse al tratamiento de los diversos planteos de inconstitucionalidad articulados por las partes. 'El sentenciante no está obligado a referirse en la sentencia a todos los elementos de juicio aportados a los autos. Bastando con que se mencione en forma clara y concreta a aquello que se consideran conducentes para la resolución del caso' (CC 0203, LP 90274, RSD 20-99; 23/2/99)."
-
-## Cierre
 "Así lo voto (art. 57 inc. 4 ley 15.057)."
 
-## Adhesión 2° magistrado
-"[El/La] [Señor Juez doctor / Señora Jueza doctora] [APELLIDO 2°], por los mismos fundamentos, adhiere al voto precedente."
+# IMPORTANTE
 
-## Voto de Weiss (CON SALVEDAD)
-INSERTAR EL TEXTO LITERAL de la VARIANTE indicada (1, 2 o 3 — según el dato "variante_weiss" que recibirás). Usá el texto exacto definido en el sistema arriba, reemplazando solo las menciones a apellidos según corresponda.
-
-## Cierre del Acuerdo
-"Con lo que terminó el Acuerdo firmando los Señores Jueces por ante mí que doy fe."
-
-# REGLAS DE CÁLCULO
-
-- Todos los cálculos numéricos deben hacerse con precisión. Verificá:
-  • coef = RIPTE_actual / RIPTE_mes_accidente (con 3 decimales)
-  • IBM_RIPTE = IBM_bruto × coef
-  • Hipótesis_a = 53 × (IBM_bruto + intereses_BNA) × 65 / edad × (% / 100)
-  • Hipótesis_b = 53 × IBM_RIPTE × 65 / edad × (% / 100)
-  • Si es accidente: total = Hipótesis_b × 1.20
-- Verificá que Hipótesis_b > Hipótesis_a antes de declarar la inconstitucionalidad. Si no fuera así, alertá en una nota al final (no se daría en condiciones normales actuales).
-- Montos en formato $ X.XXX.XXX,XX con coma decimal y punto miles (formato argentino).`;
+- NO incluyas la indemnización ni la comparación RIPTE — eso va en la Segunda Cuestión.
+- NO incluyas adhesiones ni Segunda Cuestión — eso lo agregamos por fuera.
+- Terminá con "Así lo voto" y nada más.`;
+}
 
 // =============================================================================
-// PROMPT 5 — SENTENCIA (dispositivo final: AUTOS Y VISTO + RESUELVE)
+// 5. SEGUNDA CUESTIÓN
 // =============================================================================
 
-export const PROMPT_SENTENCIA = `${BASE_SYSTEM_PROMPT}
+export function buildSegundaUserPrompt(chunks, datos, config, calculos) {
+  const ripte = config.ripte_actual || '[RIPTE ACTUAL]';
+  const rfecha = config.ripte_fecha || '[FECHA]';
 
-# TAREA ACTUAL
+  return REGLA_DATOS +
+`TEXTO DEL EXPEDIENTE - SECCIONES AFIP Y ALEGATOS:
 
-Redactá el bloque final de la sentencia: AUTOS Y VISTOS + CONSIDERANDO + el RESUELVE con todos los puntos del dispositivo. Esto va DESPUÉS del Acuerdo.
+${chunks.afip.slice(0, 8000)}
+
+--- ALEGATOS ---
+
+${chunks.alegatos}
+
+DATOS:
+
+${JSON.stringify(datos, null, 2)}
+
+CÁLCULOS YA RESUELTOS (usalos textualmente, NO recalcules):
+
+${JSON.stringify(calculos, null, 2)}
+
+# TAREA
+
+Redactá ÚNICAMENTE el contenido del voto de la SEGUNDA CUESTIÓN del magistrado que vota primero. NO incluyas el encabezado "SEGUNDA CUESTIÓN" ni "A LA SEGUNDA CUESTIÓN PLANTEADA [...] DIJO:" — eso se agrega por fuera. NO incluyas adhesiones.
 
 # ESTRUCTURA OBLIGATORIA
 
-## Encabezado
-SENTENCIA
+## 1. SÍNTESIS (2 párrafos breves)
 
-AUTOS Y VISTOS: CONSIDERANDO: Lo resuelto en el Acuerdo que antecede, y por los fundamentos allí vertidos, el Tribunal del Trabajo N° 5 de Quilmes, por mayoría RESUELVE:
+"De acuerdo a los hechos acreditados en la cuestión que antecede se probó que la parte actora como consecuencia del accidente de trabajo sufrido padece secuelas psicofísicas que la incapacitan en un [%] de la t.o. Asimismo quedó acreditado que su edad al momento del accidente era de [edad] años y que el IBM bruto AFIP asciende a la suma de ${calculos?.fmt?.ibmBruto || '$ [IBM]'}."
 
-## Items del dispositivo (numerados implícitamente, en párrafos separados)
+## 2. CÁLCULO HIPÓTESIS (a) — TASA ACTIVA BNA
 
-### 1. Declaraciones especiales previas (si aplican):
-- Si se rechazó excepción de prescripción: "Rechazar la excepción de prescripción opuesta por la parte demandada con costas a su cargo."
-- Si se declaró inconstitucionalidad: "Declarar la inconstitucionalidad del inc. 2 del art. 12 LRT."
-- Si se desestimaron planteos: "Desestímese el pedido de declaración de inconstitucionalidad de la ley 24.432 solicitado por la parte actora."
+"Finalmente correspondería calcular el interés equivalente al promedio de la tasa activa cartera general nominal anual vencida a treinta (30) días del Banco de la Nación Argentina previsto en el inc. 2 del art. 11 de la ley 27.348 que modifica el art. 12 LRT. Dicho interés es de ${calculos?.fmt?.intereseseBNA || '$ [intereses]'} al que sumándole el ibm de ${calculos?.fmt?.ibmBruto || '$ [ibm]'}, se arriba al ibm con intereses de ${calculos?.fmt?.ibmConIntereses || '$ [ibm+int]'}."
 
-### 2. Condena principal (o rechazo):
-SI HACE LUGAR:
-"Hacer lugar a la demanda incoada por [NOMBRE ACTOR] cuyo pago de PESOS [MONTO EN LETRAS MAYÚSCULAS] ($ [MONTO NÚMERO]) deberá afrontar [DEMANDADA] en el plazo de diez días de quedar firme el presente pronunciamiento, conforme todo el detalle realizado por el reclamo de autos (art. 345 CPCC y 89 ley 15.057)."
+"La fórmula entonces determina una indemnización de ${calculos?.fmt?.hipotesisA || '$ [hipotesis A]'} (53 × ${calculos?.fmt?.ibmConIntereses || ''} × 65 / [edad] × [%])."
 
-SI RECHAZA:
-"Rechazar en un todo la demanda por reclamo indemnizatorio leyes 24.557 y 26.773, con sustento en el accidente que integra estas actuaciones, padecido por [NOMBRE ACTOR], contra [DEMANDADA] (art. 726 CCC)."
+## 3. RAZONAMIENTO CONSTITUCIONAL (8-10 párrafos extensos)
 
-### 3. Bloque CBU (literal, solo si hace lugar):
-"En atención a lo dispuesto por el art. 17 de la ley 27.348; el monto de condena, se abonará por la demandada obligada al pago, en forma directa en la cuenta bancaria sueldo – ley 26.590 - del trabajador (actor). A tal fin, se debe adjuntar constancia de CBU del acreedor judicial e informar sus datos en el expediente: nombre y apellido completo, CBU, CUIT, DNI, número y tipo de cuenta, banco, sucursal y localidad, correo electrónico, en el cuerpo del escrito que presenten."
+Desarrollá en este orden:
 
-"Si el trabajador no contara con cuenta sueldo a su exclusiva titularidad – ley 26.590 -, bajo juramento de decir verdad, que no cuenta con la misma, podrá denunciar cualquier otra cuenta bancaria de la que sea único y exclusivo titular, no admitiéndose cuentas que contaren con otros titulares o, en su defecto, abrir a su exclusiva titularidad una cuenta gratuita en el Banco de la Provincia de Buenos Aires. (Cuenta DNI)."
+a) "Ahora bien, y en atención al pedido formulado por la parte actora en [puntos del escrito / presentación], se impone realizar un análisis económico de la cuestión a debate."
 
-"Una vez que se cumpla lo indicado en el párrafo anterior, comenzará a correr el plazo impuesto en la sentencia para que el obligado realice el pago."
+b) "El art. 11 de la Ley 27.348, al introducir modificaciones en el art. 12 de la Ley de Riesgos del Trabajo, tuvo como finalidad mejorar la reparación de los daños derivados de infortunios laborales, incorporando parámetros de actualización para el cálculo del ingreso base mensual (IBM), en línea con el carácter alimentario del crédito del trabajador y la necesidad de preservar su valor real."
 
-"La parte obligada al pago deberá acreditar en autos el debido cumplimiento de las obligaciones dinerarias impuestas dentro del mismo plazo que se dispone para que las abone."
+c) "Posteriormente, el DNU 669/19 —aunque inconstitucional por falta de los presupuestos de necesidad y urgencia, según lo resuelto por la SCBA en 'Muzychuk'— incorporó una pauta de actualización en el inciso 2 del art. 12 LRT que, aun cuando implicaba una mejora en la protección del crédito laboral frente a la inflación, quedó sin efecto por la invalidez formal del decreto."
 
-### 4. Intereses por mora (solo si hace lugar):
+d) "Que los vaivenes normativos y la ausencia de un criterio sostenido en la actualización del IBM, en un contexto de persistente alta inflación —en especial en el momento en el que se generó el crédito—, han facilitado la licuación del capital indemnizatorio, afectando gravemente la finalidad resarcitoria de la norma."
+
+e) "Que del propio análisis económico desarrollado por la SCBA en el fallo 'Barrios' quedó en evidencia que, en contextos inflacionarios severos, la prohibición de actualización conduce a resultados desproporcionados y lesivos del derecho de propiedad, al no preservar el poder adquisitivo del crédito, que exige mecanismos de repotenciación que aseguren la equivalencia real de las prestaciones."
+
+f) "Asimismo la jurisprudencia constante de la SCBA ('Monchiero' L. 120.521, 'Amaya' L. 120.348, entre otros) y de la CSJN ('Aquino', 'Milone', 'Ascua', 'Vizzoti') ha enfatizado que el trabajador es sujeto de preferente tutela constitucional y que los créditos laborales —en el caso que nos atañe, las prestaciones derivadas de accidentes de trabajo— deben garantizar una reparación suficiente, razonable y proporcional, evitando reducciones confiscatorias o irrazonables de la base de cálculo."
+
+g) "Que, a la luz de tales premisas, el inciso 2 del art. 12 LRT —en cuanto impide que el IBM refleje las variaciones salariales reales ocurridas hasta el efectivo pago— resulta incompatible con los arts. 14 bis y 17 de la Constitución Nacional, en tanto propicia un menoscabo sustancial del crédito de naturaleza alimentaria."
+
+## 4. COMPARATIVA NUMÉRICA EXPLÍCITA
+
+"Adviértase que la fórmula indemnizatoria utilizando la tasa de interés devengada entre la fecha del infortunio ([FECHA ACCIDENTE]) hasta la actualidad calculada según el promedio de la tasa activa cartera general del Banco de la Nación Argentina arroja un ibm de ${calculos?.fmt?.ibmConIntereses || '$ [X]'} y una indemnización de ${calculos?.fmt?.hipotesisA || '$ [X]'}; mientras que si se aplicara en igual período el índice 'ripte', el ibm se elevaría a ${calculos?.fmt?.ibmRIPTE || '$ [Y]'} y la indemnización alcanzaría el importe de ${calculos?.fmt?.hipotesisB || '$ [Y]'} (según el siguiente detalle: último ripte publicado ${rfecha}: $ ${ripte} / ripte [mes accidente]: $ ${calculos?.ripteAccidente || '[X]'} = coef. ${calculos?.coefRipte || '[X]'}. ibm de ${calculos?.fmt?.ibmBruto || '$ [X]'} × coef ${calculos?.coefRipte || '[X]'} = ${calculos?.fmt?.ibmRIPTE || '$ [Y]'}; 53 × ${calculos?.fmt?.ibmRIPTE || ''} × 65 / [edad] × [%])."
+
+## 5. DECLARACIÓN DE INCONSTITUCIONALIDAD Y CONDENA
+
+"Que, en consecuencia, corresponde declarar la inconstitucionalidad del inc. 2 del art. 12 LRT en este caso y disponer que el ingreso base mensual se actualice conforme al índice RIPTE hasta la fecha de pago, asegurando así la integridad del crédito y el respeto del espíritu protector que informa nuestro ordenamiento y que, en última instancia, coloca al trabajador en el centro de la escena como sujeto de preferente tutela constitucional (art. 14 CN)."
+
+"Por ello y teniendo en cuenta los hechos probados, de acuerdo con lo previsto por los arts. 6 y 14.2 de la ley 24.557, corresponde —teniendo en cuenta la edad de [NOMBRE] a la fecha del accidente ([edad] años), la minusvalía de su capacidad laborativa ([%]) y el IBM con RIPTE ${calculos?.fmt?.ibmRIPTE || '$ [X]'}— una indemnización que asciende a la suma de ${calculos?.fmt?.hipotesisB || '$ [Y]'} (53 × ${calculos?.fmt?.ibmRIPTE || ''} × 65 / [edad] × [%]) (arts. 6 y 14.2 ley 24.557, art. 12 ley 27.348)."
+
+${calculos?.esAccidente ? `"Finalmente y tratándose de un accidente de trabajo corresponde adicionarle el 20% previsto por el art. 3 de la ley 26.773, alcanzando el monto total de condena la suma de ${calculos.fmt.total} (${calculos.fmt.hipotesisB} + ${calculos.fmt.adicional20})."
+
+"El monto al que asciende la indemnización por incapacidad laboral derivada del accidente de trabajo sufrido en los términos de la Ley de Riesgos del Trabajo asciende a la suma de ${calculos.totalEnLetras} (${calculos.fmt.total})."` : ''}
+
+## 6. INTERESES POR MORA
+
+"Intereses: A partir de la mora en el pago de la presente indemnización será de aplicación lo establecido por el artículo 770 del Código Civil y Comercial acumulándose los intereses al capital, y el producido devengará un interés equivalente al promedio de la tasa activa cartera general nominal anual vencida a treinta (30) días del Banco de la Nación Argentina, hasta la efectiva cancelación (art. 12 ley 24.557 según texto ley 27.348)."
+
+## 7. COSTAS
+
+"Costas: Imponer las costas del presente juicio a cargo de la demandada [DEMANDADA] en su condición de vencida (art. 24 ley 15.057)."
+
+${datos?.denuncia_inconst_ley_24432 ? `
+## 8. INCONST. LEY 24.432 (la actora la planteó)
+
+"La parte actora solicita la declaración de inconstitucionalidad de la ley 24.432 y la parte demandada solicita su aplicación: De acuerdo a la doctrina legal de la SCBA (causas L. 77.914, 'Zuccoli', sent. de 2-X-2002; L. 119.955, 'Duarte', sent. de 14-VIII-2019; L. 121.989, 'Mosiejchuk', sent. de 26-XII-2019; e.o.), se desestima la petición formulada por la parte actora (SCBA causas L. 93.064, 'Vas da Silva', sent. de 2-III-2011; L. 112.832, 'G., D. H.', sent. de 2-V-2013; L. 117.427, 'Caraballo', sent. de 20-V-2015; L. 118.434, 'Virgili', sent. de 12-IV-2017 y L. 125.474, 'Magyar', sent. de 31-VIII-2022; entre otras)."
+` : ''}
+
+## 9. PLANTEOS RESTANTES (ABSTRACTO)
+
+"Asimismo, y dado el modo de resolución propuesta de la controversia de marras, deviene en mi opinión abstracto abocarse al tratamiento de los diversos planteos de inconstitucionalidad articulados por las partes. 'El sentenciante no está obligado a referirse en la sentencia a todos los elementos de juicio aportados a los autos. Bastando con que se mencione en forma clara y concreta a aquello que se consideran conducentes para la resolución del caso' (CC 0203, LP 90274, RSD 20-99; 23/2/99)."
+
+## 10. CIERRE
+
+"Así lo voto (art. 57 inc. 4 ley 15.057)."
+
+# IMPORTANTE
+
+- NO incluyas las adhesiones del 2° magistrado ni de Weiss — esas las agrego por fuera.
+- Si "calculos.esAccidente" es false (enfermedad profesional), OMITÍ el +20% del art. 3 ley 26.773.`;
+}
+
+// =============================================================================
+// 6. SENTENCIA (dispositivo final)
+// =============================================================================
+
+export function buildSentenciaUserPrompt(chunks, datos, config, calculos) {
+  const { honorarios = {} } = config;
+  const honActor = honorarios.actor ? `$ ${honorarios.actor}` : '[A COMPLETAR]';
+  const honDem = honorarios.dem ? `$ ${honorarios.dem}` : '[A COMPLETAR]';
+  const honPerito = honorarios.perito ? `$ ${honorarios.perito}` : '[A COMPLETAR]';
+  const honPsi = honorarios.tienePeritoPsi && honorarios.peritoPs ? `$ ${honorarios.peritoPs}` : null;
+  const nombreActor = honorarios.actorNombre || '[LETRADO ACTOR]';
+  const nombreDem = honorarios.demNombre || '[LETRADO DEMANDADA]';
+
+  const haceLugar = !!calculos;
+  const montoCondenaLetras = calculos?.totalEnLetras || '[A COMPLETAR EN LETRAS]';
+  const montoCondenaNum = calculos?.fmt?.total || '[A COMPLETAR]';
+
+  return REGLA_DATOS +
+`CONTEXTO - DATOS BÁSICOS:
+
+${chunks.header.slice(0, 5000)}
+
+--- FINAL DEL EXPEDIENTE ---
+
+${chunks.final}
+
+DATOS:
+
+${JSON.stringify(datos, null, 2)}
+
+CÁLCULOS:
+
+${JSON.stringify(calculos, null, 2)}
+
+# TAREA
+
+Redactá la SENTENCIA DISPOSITIVO completa. NO incluyas el "S E N T E N C I A" ni el "AUTOS Y VISTO: CONSIDERANDO:" inicial — eso se agrega por fuera. Empezá directamente con los incisos del RESUELVE.
+
+# INCISOS EN ORDEN EXACTO
+
+## 1°) DECLARACIONES PREVIAS
+
+${haceLugar
+  ? '"Declarar la inconstitucionalidad sobreviniente e inaplicabilidad al caso del inc. 2 del art. 12 ley 24.557 (texto ley 27.348), por violentar los arts. 14 bis, 17 y 33 CN."\n\n(Si hubo excepción de prescripción rechazada, agregá: "Rechazar la excepción de prescripción opuesta por la parte demandada con costas a su cargo.")\n\n(Si el actor planteó inconst. ley 24.432: "Desestímese el pedido de declaración de inconstitucionalidad de la ley 24.432 solicitado por la parte actora.")'
+  : '"Declarar abstracto las impugnaciones de inconstitucionalidad opuestas por la parte actora."'}
+
+## 2°) CONDENA PRINCIPAL
+
+${haceLugar
+  ? `"Hacer lugar a la demanda incoada por [NOMBRE ACTOR] cuyo pago de ${montoCondenaLetras} (${montoCondenaNum}) deberá afrontar [DEMANDADA] en el plazo de diez (10) días de quedar firme el presente pronunciamiento, conforme todo el detalle realizado por el reclamo de autos (arts. 6.1, 8.1 y 14.2.a ley 24.557, art. 12 ley 27.348${calculos?.esAccidente ? ', art. 3 ley 26.773' : ''}; art. 345 CPCC y 89 ley 15.057). Por las secuelas psicofísicas que padece, que lo/la incapacitan en el [%] de la t.o."`
+  : '"Rechazar en un todo la demanda por reclamo indemnizatorio leyes 24.557 y 26.773, con sustento en el accidente que integra estas actuaciones, padecido por [NOMBRE ACTOR], contra [DEMANDADA] (art. 726 CCC)."'}
+
+${haceLugar ? `
+## 3°) INSTRUCCIONES CBU (TEXTO ÍNTEGRO — copiar literal)
+
+"En atención a lo dispuesto por el art. 17 de la ley 27.348; el monto de condena, se abonará por la demandada obligada al pago, en forma directa en la cuenta bancaria sueldo – ley 26.590 - del trabajador (actor). A tal fin, se debe adjuntar constancia de CBU del acreedor judicial e informar sus datos en el expediente: nombre y apellido completo, CBU, CUIT, DNI, número y tipo de cuenta, banco, sucursal y localidad, correo electrónico, en el cuerpo del escrito que presenten.
+
+Si el trabajador no contara con cuenta sueldo a su exclusiva titularidad – ley 26.590 -, bajo juramento de decir verdad, que no cuenta con la misma, podrá denunciar cualquier otra cuenta bancaria de la que sea único y exclusivo titular, no admitiéndose cuentas que contaren con otros titulares o, en su defecto, abrir a su exclusiva titularidad una cuenta gratuita en el Banco de la Provincia de Buenos Aires. (Cuenta DNI).
+
+Una vez que se cumpla lo indicado en el párrafo anterior, comenzará a correr el plazo impuesto en la sentencia para que el obligado realice el pago.
+
+La parte obligada al pago deberá acreditar en autos el debido cumplimiento de las obligaciones dinerarias impuestas dentro del mismo plazo que se dispone para que las abone."
+
+## 4°) INTERESES POR MORA
+
 "A partir de la mora en el pago de la presente indemnización será de aplicación lo establecido por el artículo 770 del Código Civil y Comercial acumulándose los intereses al capital, y el producido devengará un interés equivalente al promedio de la tasa activa cartera general nominal anual vencida a treinta (30) días del Banco de la Nación Argentina, hasta la efectiva cancelación (art. 12 ley 24.557 según texto ley 27.348)."
+` : ''}
 
-### 5. Costas:
-SI HACE LUGAR: "Imponer las costas del presente juicio a cargo de la demandada [DEMANDADA] en su condición de vencida (art. 24 Ley 15.057)."
-SI RECHAZA: "Las costas del juicio deben imponerse a la parte actora en su condición de vencida (art. 24 ley 15.057). Quien cuenta con los beneficios de gratuidad y litigar sin gastos (arts. 25 y 27 ley 15.057; arts. 1° y 2° ley 12.200)."
+## ${haceLugar ? '5°' : '3°'}) COSTAS
 
-### 6. Honorarios letrados:
-"En atención al monto del juicio, etapas procesales cumplidas, naturaleza de las cuestiones debatidas, resultado obtenido, actuaciones esenciales y de mero trámite realizadas y calidad y mérito de la labor desarrollada, regúlanse los honorarios de los profesionales intervinientes, por la parte actora: al [Dr./Dra. NOMBRE] en la suma de pesos [MONTO LETRAS] ($ [MONTO NÚMERO] o [N° IUS] JUS Ac. [N°]/[AÑO]), por la parte demandada, al [Dr./Dra. NOMBRE] en la suma de pesos [MONTO LETRAS] ($ [MONTO NÚMERO] o [N° IUS] JUS Ac. [N°]/[AÑO]); todos con más los aportes legales correspondientes e IVA en caso de corresponder (arts. 2, 9, 11, 13 a 16, 21, 23, 26, 28, 51 y 54 ley 14.967; SCBA Q-75064 'Pallasá, Diego Javier c/ A.R.B.A. s/ Pretensión anulatoria', sent. del 06/11/2019)."
+${haceLugar
+  ? '"Imponer las costas del presente juicio a cargo de la demandada [DEMANDADA] en su condición de vencida (art. 24 Ley 15.057)."'
+  : '"Las costas del juicio deben imponerse a la parte actora en su condición de vencida (art. 24 ley 15.057). Quien cuenta con los beneficios de gratuidad y litigar sin gastos (arts. 25 y 27 ley 15.057; arts. 1° y 2° ley 12.200)."'}
 
-"Los honorarios regulados deberán abonarse dentro de los diez (10) días de quedar firme el presente auto regulatorio (conf. art. 54 ley 14.967)."
+## ${haceLugar ? '6°' : '4°'}) HONORARIOS
 
-### 7. Honorarios peritos:
-"Asimismo regúlanse los honorarios del perito médico [Dr. APELLIDO] en la suma de pesos [LETRAS] ($ [NÚMERO]), con más el 10% (ley 6.742) e IVA para el caso de corresponder."
+"En atención al monto del juicio, etapas procesales cumplidas, naturaleza de las cuestiones debatidas, resultado obtenido, actuaciones esenciales y de mero trámite realizadas y calidad y mérito de la labor desarrollada, regúlanse los honorarios de los profesionales intervinientes:
 
-(Si hay perito psicólogo/psiquiatra, agregar línea análoga.)
+Por la parte actora: ${nombreActor} en la suma de ${honActor} (IUS según ac. SCBA vigente).
+Por la parte demandada: ${nombreDem} en la suma de ${honDem}.
 
-### 8. Bloque CBU para profesionales:
-"Los honorarios se abonarán directamente en las cuentas bancarias de los profesionales (abogados y peritos), quienes deben adjuntar constancia de CBU y factura correspondiente e informar sus datos en el expediente: nombre y apellido completo, CBU, CUIT, DNI, número y tipo de cuenta, banco, sucursal y localidad, correo electrónico, en el cuerpo del escrito que presenten; conforme a las pautas que se especifican en: http://blogs.scba.gov.ar/tribunaltrabajo5quilmes/2020/08/12/solicitud-de-tranferencias/ (art. 12 ley 15.057)."
+Todos con más los aportes legales correspondientes e IVA en caso de corresponder (arts. 2, 9, 11, 13 a 16, 21, 23, 26, 28, 51 y 54 ley 14.967; SCBA Q-75064 'Pallasá, Diego Javier c/ A.R.B.A. s/ Pretensión anulatoria', sent. del 06/11/2019).
 
-"Una vez que se cumpla lo indicado en el párrafo anterior, comenzará a correr el plazo para que el obligado realice el pago."
+Los honorarios regulados deberán abonarse dentro de los diez (10) días de quedar firme el presente auto regulatorio (conf. art. 54 ley 14.967)."
 
-"Asimismo, se hace saber que deberán acompañar los comprobantes de pago de aportes."
+## ${haceLugar ? '7°' : '5°'}) HONORARIOS PERITOS
 
-### 9. Pie del dispositivo (LITERAL):
+"Asimismo regúlanse los honorarios del perito médico Dr./Dra. [PERITO MÉDICO] en la suma de ${honPerito}, con más el 10% (ley 6.742) e IVA para el caso de corresponder."
+
+${honPsi ? `"Regúlanse los honorarios del/de la perito psiquiatra/psicólogo/a Dr./Dra. [PERITO PSI] en la suma de ${honPsi}, con más los aportes de ley e IVA en caso de corresponder."` : ''}
+
+${haceLugar ? `
+## 8°) INSTRUCCIONES PAGO HONORARIOS (TEXTO ÍNTEGRO)
+
+"Los honorarios se abonarán directamente en las cuentas bancarias de los profesionales (abogados y peritos), quienes deben adjuntar constancia de CBU y factura correspondiente e informar sus datos en el expediente: nombre y apellido completo, CBU, CUIT, DNI, número y tipo de cuenta, banco, sucursal y localidad, correo electrónico, en el cuerpo del escrito que presenten; conforme a las pautas que se especifican en: http://blogs.scba.gov.ar/tribunaltrabajo5quilmes/2020/08/12/solicitud-de-tranferencias/ (art. 12 ley 15.057).
+
+Una vez que se cumpla lo indicado en el párrafo anterior, comenzará a correr el plazo para que el obligado realice el pago.
+
+Asimismo, se hace saber que deberán acompañar los comprobantes de pago de aportes."
+` : ''}
+
+## CIERRE OBLIGATORIO
+
 "REGISTRESE, NOTIFIQUESE, con transcripción de lo dispuesto en el art. 54 Ley 14.967 y oportunamente ARCHIVESE."
 
-### 10. Transcripción literal del ARTÍCULO 54 ley 14.967:
+## TRANSCRIPCIÓN ART. 54 LEY 14.967 (TEXTO ÍNTEGRO)
+
 "ARTÍCULO 54 ley 14.967: Las providencias que regulen honorarios deberán ser notificadas personalmente, por cédula a sus beneficiarios, al mandante o patrocinado y al condenado en costas, si lo hubiere. Asimismo, será válida la notificación de la regulación de honorarios efectuada por cualquier otro medio fehaciente, a costa del interesado.
 
 Los honorarios a cargo del mandante o patrocinado quedarán firmes a su respecto si la notificación se hubiere practicado en su domicilio real y a la contraparte en su domicilio constituido.
@@ -494,23 +524,72 @@ a) reclamar los honorarios expresados en la unidad arancelaria Jus prevista en e
 
 b) reclamar los honorarios regulados convertidos al momento de la mora en moneda de curso legal, con más el interés previsto en el artículo 552 del Código Civil y Comercial de la Nación."
 
-# REGLAS
+# IMPORTANTE
 
-- TODOS los montos se escriben en NÚMERO ($ X.XXX.XXX,XX) y en LETRAS MAYÚSCULAS la primera vez que aparece el total ("PESOS CUATRO MILLONES DOSCIENTOS DOCE MIL...").
-- Si la demanda fue rechazada, omití los bloques CBU, intereses por mora, honorarios del actor por porcentaje del demandado, etc.
-- Para casos de rechazo, los honorarios del letrado del actor (vencido) y peritos se regulan según escala mínima.
-- Devolvé SOLO el texto del bloque SENTENCIA / AUTOS Y VISTO / RESUELVE / etc., sin títulos extras ni explicación.`;
+- Numerá los incisos como aparecen arriba (1°, 2°, 3°, etc.).
+- Incluí los bloques marcados como "TEXTO ÍNTEGRO" literalmente, sin acortar.
+- Si rechaza la demanda: omití CBU, intereses por mora, instrucciones de pago de honorarios.`;
+}
 
 // =============================================================================
-// HELPER: utilidades para usar los prompts
+// ADHESIONES (texto fijo, NO requieren LLM)
 // =============================================================================
 
-export const PROMPTS = {
-  EXTRACT: PROMPT_EXTRACT,
-  ANTECEDENTES: PROMPT_ANTECEDENTES,
-  RESOLUCION: PROMPT_RESOLUCION,
-  SEGUNDA: PROMPT_SEGUNDA_CUESTION,
-  SENTENCIA: PROMPT_SENTENCIA,
-};
+const WEISS_NOMBRE_COMPLETO = 'LA SEÑORA JUEZA DOCTORA MARÍA ALEJANDRA WEISS';
 
-export default PROMPTS;
+/**
+ * Construye las adhesiones de la PRIMERA CUESTIÓN (todas son simples
+ * "por compartir fundamentos").
+ */
+export function buildAdhesionPrimera(config) {
+  const { juez2 } = config;
+  const j2art = juez2.genero === 'm' ? 'el Señor Juez Doctor' : 'la Señora Jueza Doctora';
+  const j2nombre = juez2.genero === 'm' ? 'Mario Daniel Stolarczyk' : 'Andrea Marcela Zacarías';
+
+  const adhJ2 = `A la misma cuestión planteada ${j2art} ${j2nombre}, por compartir fundamentos, adhiere en todos sus términos al voto que antecede.`;
+  const adhWeiss = `A la misma cuestión planteada ${WEISS_NOMBRE_COMPLETO}, por compartir fundamentos, adhiere en todos sus términos al voto que antecede.`;
+
+  return `${adhJ2}\n\n${adhWeiss}`;
+}
+
+/**
+ * Construye las adhesiones de la SEGUNDA CUESTIÓN.
+ * Variante 1 (RIPTE + actor planteó inconst. art. 7 ley 23.928): Weiss vota CON salvedad.
+ * Variante 2 (RIPTE sin que actor lo haya planteado): Weiss vota con salvedad NIEVA.
+ * Variante 3 (rechazo): Weiss adhiere sin salvedad.
+ */
+export function buildAdhesionSegunda(config, calculos, datos) {
+  const { juez2 } = config;
+  const j2art = juez2.genero === 'm' ? 'el Señor Juez Doctor' : 'la Señora Jueza Doctora';
+  const j2nombre = juez2.genero === 'm' ? 'Mario Daniel Stolarczyk' : 'Andrea Marcela Zacarías';
+  const j2corto = juez2.corto;
+  const primerCorto = config.juez1.corto;
+
+  const adhJ2 = `A la misma cuestión planteada ${j2art} ${j2nombre}, por los mismos fundamentos, adhiere al voto precedente.`;
+
+  let adhWeiss;
+  if (!calculos) {
+    // Variante 3: rechazo
+    adhWeiss = `A la misma cuestión planteada, ${WEISS_NOMBRE_COMPLETO}, adhiere a las consideraciones formuladas por ${primerCorto} y vota en igual sentido.`;
+  } else if (datos?.denuncia_inconst_ley_23928) {
+    // Variante 1: actor planteó inconst. art. 7 ley 23.928
+    adhWeiss = `A LA SEGUNDA CUESTIÓN PLANTEADA ${WEISS_NOMBRE_COMPLETO}, DIJO: Sin perjuicio de compartir la solución adoptada en cuanto a la procedencia de la actualización del ingreso base mensual conforme al índice RIPTE, discrepo con el fundamento en que se sustenta. Mientras el voto mayoritario —siguiendo el criterio del Tribunal del Trabajo N.º 5— basa su decisión en la declaración de inconstitucionalidad del inciso 2 del artículo 12 de la Ley de Riesgos del Trabajo, considero, conforme a la postura que mantengo en el Tribunal del Trabajo N.º 4 que integro, que tanto la procedencia de la actualización como la invalidez de la norma citada derivan de la inconstitucionalidad sobreviniente del artículo 7 de la ley 23.928, conforme lo dispuesto por la ley 25.561, cuya tacha fue oportunamente articulada por la parte actora.\n\nAsí lo voto.`;
+  } else {
+    // Variante 2: actor NO planteó inconst. art. 7 ley 23.928
+    adhWeiss = `A LA SEGUNDA CUESTIÓN PLANTEADA ${WEISS_NOMBRE_COMPLETO} DIJO: Habiendo en el presente quedado conformada la mayoría con los votos de los doctores ${config.juez1.nombre} y ${config.juez2.nombre}, adhiero al voto emitido en primer término, dejando a salvo que conforme criterio del Tribunal de Trabajo N° 4 departamental que integro, conforme Exp. N° 20.463 causa "NIEVA", sent. del 13/8/2025; no habiendo solicitado el actor método de actualización específico, debió aplicarse al valor del ingreso medio la tasa activa cartera general nominal anual vencida a treinta días que fija el Banco de la Nación Argentina.\n\nAsí lo voto.`;
+  }
+
+  const cierreAcuerdo = 'Con lo que terminó el Acuerdo firmando los Señores Jueces por ante mí que doy fe.';
+
+  return `${adhJ2}\n\n${adhWeiss}\n\n${cierreAcuerdo}`;
+}
+
+/**
+ * Determina cuál variante del voto de Weiss aplica.
+ * Devuelve 1, 2 o 3.
+ */
+export function detectarVarianteWeiss(calculos, datos) {
+  if (!calculos) return 3;
+  if (datos?.denuncia_inconst_ley_23928) return 1;
+  return 2;
+}
