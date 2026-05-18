@@ -1,0 +1,91 @@
+// api/tasa-bna.js
+// =============================================================================
+// TASA BNA - Endpoint asistente para obtener los intereses tasa activa cartera
+// general nominal anual vencida a 30 días del Banco de la Nación Argentina,
+// aplicados según el art. 12 ley 24.557 (texto ley 27.348) y art. 770 CCC.
+// =============================================================================
+//
+// Este endpoint NO calcula intereses por sí mismo (el cálculo correcto requiere
+// la serie histórica de tasas mensuales del BNA, que cambia constantemente y no
+// hay API oficial confiable).
+//
+// En su lugar, genera una URL al calculador oficial del Consejo de la
+// Magistratura de CABA con los parámetros pre-cargados, para que el usuario
+// abra el calculador, copie el resultado y lo pegue en SentencIA.
+//
+// USO DESDE EL FRONTEND:
+//   POST /api/tasa-bna
+//   { capital: 82209.52, fechaDesde: "2021-07-01", fechaHasta: "2026-05-18" }
+//
+//   → { calculadorUrl: "https://cdconsejo.jusbaires.gob.ar/interes?...",
+//       instrucciones: "...",
+//       scrapingIntentado: false }
+//
+// FUTURO (TODO):
+//   Si en el futuro se necesita scraping automático, se puede usar Playwright
+//   o puppeteer-core con @sparticuz/chromium en una función serverless de
+//   Vercel. Por ahora, la solución manual es 100% robusta y libre de costos.
+// =============================================================================
+
+const URL_CALCULADOR = 'https://cdconsejo.jusbaires.gob.ar/interes';
+
+function formatFechaArg(isoDate) {
+  // YYYY-MM-DD → DD/MM/YYYY
+  if (!isoDate) return '';
+  const [y, m, d] = isoDate.split('-');
+  return `${d}/${m}/${y}`;
+}
+
+export default async function handler(req, res) {
+  if (req.method !== 'POST') {
+    return res.status(405).json({ error: 'Method not allowed' });
+  }
+
+  try {
+    const { capital, fechaDesde, fechaHasta } = req.body;
+
+    if (!capital || !fechaDesde) {
+      return res.status(400).json({
+        error: 'Faltan parámetros requeridos: capital, fechaDesde',
+      });
+    }
+
+    const fechaHastaFinal = fechaHasta || new Date().toISOString().slice(0, 10);
+
+    // Construir URL del calculador con parámetros pre-cargados.
+    // NOTA: el calculador del CABA usa hash routing y carga via JS,
+    // por lo que los query params no se llenan automáticamente.
+    // Sin embargo, se le pueden pasar como referencia/instrucción al usuario.
+    const params = new URLSearchParams({
+      tasa: 'tasa_activa_bna',  // "Tasa Activa BNA"
+      capital: capital.toString(),
+      desde: fechaDesde,
+      hasta: fechaHastaFinal,
+    });
+
+    const calculadorUrl = `${URL_CALCULADOR}?${params.toString()}`;
+
+    const instrucciones = [
+      `1. Abrir el calculador oficial: ${URL_CALCULADOR}`,
+      `2. Seleccionar la tasa: "Tasa Activa BNA - cartera general - 30 días"`,
+      `3. Ingresar capital: $ ${capital.toLocaleString('es-AR', { minimumFractionDigits: 2 })}`,
+      `4. Fecha desde: ${formatFechaArg(fechaDesde)} (fecha del accidente)`,
+      `5. Fecha hasta: ${formatFechaArg(fechaHastaFinal)} (hoy o fecha de sentencia)`,
+      `6. Click en "Calcular"`,
+      `7. Copiar el valor de "Intereses" (NO el total)`,
+      `8. Pegar ese valor en el campo "Intereses BNA" de SentencIA`,
+    ].join('\n');
+
+    // TODO opcional: intentar scraping. Por ahora se deja como hint al usuario.
+    return res.status(200).json({
+      success: true,
+      calculadorUrl,
+      instrucciones,
+      scrapingIntentado: false,
+      mensaje: 'Para obtener intereses BNA, abrí el calculador del CABA y pegá el valor.',
+    });
+  } catch (error) {
+    console.error('Error en tasa-bna.js:', error);
+    return res.status(500).json({ error: error.message });
+  }
+}
