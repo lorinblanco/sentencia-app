@@ -1,8 +1,12 @@
 import { useState, useRef, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
-  extractAllText, buildChunks, extractBasicInfo, generateSection, extractExtraFileText
+  extractAllText, buildChunks, extractBasicInfo, generateSection,
+  extractExtraFileText, buildCalculos
 } from '../lib/claude'
+import {
+  buildAdhesionPrimera, buildAdhesionSegunda, detectarVarianteWeiss
+} from '../lib/sentenciaPrompts'
 import { saveSentence } from '../lib/supabase'
 import { buildWordDocument } from '../lib/word'
 
@@ -66,6 +70,17 @@ export default function NewSentence({ profile, session }) {
   const [opcionVoto, setOpcionVoto] = useState(0)
   const [ripteManual, setRipteManual] = useState('')
   const [ripteAuto, setRipteAuto] = useState({ valor: '', fecha: '', loading: false })
+
+  // NUEVOS campos para cálculos
+  const [calcInputs, setCalcInputs] = useState({
+    fechaAccidente: '',
+    ripteAccidente: '',
+    intereseseBNA: '',
+    ibmBruto: '',
+    edadActor: '',
+    porcentajeIncapacidad: '',
+  })
+
   const [honorarios, setHonorarios] = useState({
     actorNombre: '', actor: '', demNombre: '', dem: '',
     perito: '', peritoPs: '', tienePeritoPsi: false
@@ -115,6 +130,31 @@ export default function NewSentence({ profile, session }) {
     return files.filter(f => f.id !== exp?.id)
   }
 
+  async function abrirCalculadorCABA() {
+    if (!calcInputs.fechaAccidente || !calcInputs.ibmBruto) {
+      alert('Antes de calcular intereses BNA, completá:\n- Fecha del accidente\n- IBM bruto AFIP')
+      return
+    }
+    try {
+      const r = await fetch('/api/tasa-bna', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          capital: parseFloat(calcInputs.ibmBruto.toString().replace(/[$.\s]/g, '').replace(',', '.')),
+          fechaDesde: calcInputs.fechaAccidente,
+          fechaHasta: new Date().toISOString().slice(0, 10),
+        }),
+      })
+      const data = await r.json()
+      if (data.calculadorUrl) {
+        window.open(data.calculadorUrl, '_blank')
+        alert(data.instrucciones || 'Calculá los intereses en la página del Consejo de la Magistratura y pegá el valor abajo.')
+      }
+    } catch (e) {
+      alert('No se pudo abrir el calculador automáticamente. Ingresá los intereses BNA manualmente.')
+    }
+  }
+
   async function generate() {
     setStep(2); setGenError(''); setGenStep(0); setGenProgress(2); setGenSubProgress(0)
     const apiKey = profile.anthropic_api_key
@@ -131,6 +171,15 @@ export default function NewSentence({ profile, session }) {
       orden: `${voto.juez1.corto} – ${voto.juez2.corto} – ${WEISS.corto}`,
       ripte_actual: ripte,
       ripte_fecha: ripteF,
+      // Nuevos campos para cálculo
+      ripte_accidente: calcInputs.ripteAccidente,
+      intereses_bna: calcInputs.intereseseBNA,
+      ibm_bruto: calcInputs.ibmBruto,
+      edad_actor: calcInputs.edadActor ? parseInt(calcInputs.edadActor) : null,
+      porcentaje_incapacidad: calcInputs.porcentajeIncapacidad
+        ? parseFloat(calcInputs.porcentajeIncapacidad.toString().replace(',', '.'))
+        : null,
+      fecha_accidente: calcInputs.fechaAccidente,
       honorarios,
     }
 
@@ -165,6 +214,11 @@ export default function NewSentence({ profile, session }) {
       const data = await extractBasicInfo(apiKey, chunks)
       setExtractedData(data)
 
+      // Pre-cálculos en JS (no Claude)
+      const calculos = buildCalculos(config, data)
+      console.log('Cálculos:', calculos)
+      console.log('Variante Weiss:', detectarVarianteWeiss(calculos, data))
+
       const encabezado = buildEncabezado(data, config)
       let fullSentence = encabezado + '\n\n'
       fullSentence += 'El Tribunal resolvió plantear y votar las siguientes cuestiones:\n\n'
@@ -173,31 +227,33 @@ export default function NewSentence({ profile, session }) {
       setSentenceText(fullSentence)
 
       setGenStep(4); setGenProgress(45)
-      const antecedentes = await generateSection(apiKey, 'antecedentes', chunks, data, config)
+      const antecedentes = await generateSection(apiKey, 'antecedentes', chunks, data, config, calculos)
       fullSentence += antecedentes + '\n\n'
       setSentenceText(fullSentence)
 
       setGenStep(5); setGenProgress(60)
-      const resolucion = await generateSection(apiKey, 'resolucion', chunks, data, config)
+      const resolucion = await generateSection(apiKey, 'resolucion', chunks, data, config, calculos)
       fullSentence += resolucion + '\n\n'
       setSentenceText(fullSentence)
 
       setGenStep(6); setGenProgress(72)
-      const ibm = await generateSection(apiKey, 'ibm', chunks, data, config)
+      const ibm = await generateSection(apiKey, 'ibm', chunks, data, config, calculos)
       fullSentence += ibm + '\n\n'
-      fullSentence += buildAdhesionPrimera(voto) + '\n\n'
+      // Adhesiones de la PRIMERA cuestión (texto fijo)
+      fullSentence += buildAdhesionPrimera(config) + '\n\n'
       fullSentence += `SEGUNDA CUESTIÓN: ¿Qué pronunciamiento corresponde dictar?\n\n`
       fullSentence += `A LA SEGUNDA CUESTIÓN PLANTEADA ${voto.juez1.nombreCompleto} DIJO:\n\n`
       setSentenceText(fullSentence)
 
       setGenStep(7); setGenProgress(85)
-      const segunda = await generateSection(apiKey, 'segunda', chunks, data, config)
+      const segunda = await generateSection(apiKey, 'segunda', chunks, data, config, calculos)
       fullSentence += segunda + '\n\n'
-      fullSentence += buildAdhesionSegunda(voto) + '\n\n'
+      // Adhesiones de la SEGUNDA cuestión (con variante de Weiss según caso)
+      fullSentence += buildAdhesionSegunda(config, calculos, data) + '\n\n'
       setSentenceText(fullSentence)
 
       setGenStep(8); setGenProgress(93)
-      const dispositivo = await generateSection(apiKey, 'sentencia', chunks, data, config)
+      const dispositivo = await generateSection(apiKey, 'sentencia', chunks, data, config, calculos)
       fullSentence += `S  E  N  T  E  N  C  I  A\n\n`
       fullSentence += `AUTOS Y VISTO: CONSIDERANDO lo decidido en el Acuerdo que antecede y los fundamentos allí vertidos, el Tribunal del Trabajo N° 5 de Quilmes, por mayoría,\n\nRESUELVE:\n\n`
       fullSentence += dispositivo
@@ -229,28 +285,19 @@ export default function NewSentence({ profile, session }) {
     return `En la ciudad de Quilmes, se reúnen en la Sala de Acuerdos los Señores Jueces que, para este acto, integran el Tribunal del Trabajo N.º 5 de esta ciudad, ${j1Sin}, ${j2Sin} y ${weiss.nombreCivil}, a efectos de dictar Sentencia en la causa Nº ${causa} caratulada "${caratula}", conforme el siguiente orden de votación: ${juez1.nombre} – ${juez2.nombre} – ${weiss.nombre}.`
   }
 
-  function buildAdhesionPrimera(voto) {
-    const { juez2 } = voto
-    const j2articulo = juez2.genero === 'm' ? 'el Señor Juez Doctor' : 'la Señora Jueza Doctora'
-    const j2nombre = juez2.genero === 'm' ? 'Mario Daniel Stolarczyk' : 'Andrea Marcela Zacarías'
-    const j1corto = voto.juez1.corto
-    const adhesionJ2 = `A la misma cuestión planteada ${j2articulo} ${j2nombre}, por compartir fundamentos, adhiere en todos sus términos al voto que antecede.`
-    const adhesionWeiss = `A la misma cuestión planteada ${WEISS.nombreCompleto} DIJO: En virtud de las particularidades que presenta el caso en estudio, y por los fundamentos vertidos, adhiero al voto de ${j1corto}. Sin perjuicio de ello, dejo a salvo mi opinión respecto a que la limitación impuesta por el art. 7 de la ley 23.928 podría resultar inconstitucional en forma sobreviniente, conforme los fundamentos que he desarrollado en anteriores pronunciamientos. Así lo voto.`
-    return `${adhesionJ2}\n\n${adhesionWeiss}`
-  }
-
-  function buildAdhesionSegunda(voto) {
-    const { juez2 } = voto
-    const j2sin = juez2.corto.replace(/^Dr[ao]\.\s*/, '')
-    return `A la misma cuestión planteada los señores jueces doctores ${j2sin} y ${WEISS.nombreCivil}, por compartir fundamentos, adhieren en todos sus términos al voto que antecede.\n\nCon lo que terminó el Acuerdo firmando los Señores Jueces por ante mí que doy fe.`
-  }
-
   async function downloadWord() {
     if (!sentenceText) return
     await buildWordDocument(sentenceText, extractedData?.caratula, extractedData?.causa_numero)
   }
 
   const expedientePDF = getExpedientePDF()
+
+  // Validación para habilitar el botón GENERAR
+  const camposCalculoOK = calcInputs.ripteAccidente
+    && calcInputs.intereseseBNA
+    && calcInputs.ibmBruto
+    && calcInputs.edadActor
+    && calcInputs.porcentajeIncapacidad
 
   return (
     <div className="min-h-screen bg-slate-50">
@@ -373,12 +420,13 @@ export default function NewSentence({ profile, session }) {
             <div className="mb-6">
               <h2 className="text-xl font-semibold text-slate-800">Paso 2 — Configuración</h2>
               <p className="text-slate-500 text-sm mt-1">
-                El tipo de acción se detecta automáticamente del expediente. Solo configure el orden de votación y demás datos.
+                Complete los datos del cálculo. El tipo de acción y los nombres se detectan automáticamente.
               </p>
             </div>
 
             <div className="grid grid-cols-1 gap-6">
 
+              {/* ORDEN DE VOTACIÓN */}
               <div className="bg-white rounded-xl border border-slate-200 p-5">
                 <h3 className="font-medium text-slate-800 mb-1">Orden de votación</h3>
                 <p className="text-xs text-slate-400 mb-4">
@@ -403,9 +451,10 @@ export default function NewSentence({ profile, session }) {
                 </div>
               </div>
 
+              {/* RIPTE ACTUAL */}
               <div className="bg-white rounded-xl border border-slate-200 p-5">
-                <h3 className="font-medium text-slate-800 mb-1">RIPTE actual</h3>
-                <p className="text-xs text-slate-400 mb-3">Valor actualizado automáticamente.</p>
+                <h3 className="font-medium text-slate-800 mb-1">RIPTE actual (último publicado)</h3>
+                <p className="text-xs text-slate-400 mb-3">Se busca automáticamente.</p>
                 {ripteAuto.loading ? (
                   <div className="flex items-center gap-2 text-sm text-slate-500">
                     <span className="w-4 h-4 border-2 border-slate-300 border-t-slate-600 rounded-full animate-spin"></span>
@@ -437,6 +486,87 @@ export default function NewSentence({ profile, session }) {
                 </div>
               </div>
 
+              {/* DATOS DEL CÁLCULO — NUEVO */}
+              <div className="bg-white rounded-xl border border-slate-200 p-5">
+                <h3 className="font-medium text-slate-800 mb-1">Datos del cálculo de indemnización</h3>
+                <p className="text-xs text-slate-400 mb-4">
+                  Todos los campos son obligatorios. La IA usará estos valores para hacer la comparación tasa BNA vs RIPTE y declarar inconstitucionalidad del art. 12 LRT si corresponde.
+                </p>
+
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-xs font-medium text-slate-600 mb-1">Fecha del accidente *</label>
+                    <input
+                      type="date"
+                      value={calcInputs.fechaAccidente}
+                      onChange={e => setCalcInputs(p => ({ ...p, fechaAccidente: e.target.value }))}
+                      className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-medium text-slate-600 mb-1">RIPTE del mes del accidente *</label>
+                    <input
+                      value={calcInputs.ripteAccidente}
+                      onChange={e => setCalcInputs(p => ({ ...p, ripteAccidente: e.target.value }))}
+                      placeholder="Ej: 8.665,19"
+                      className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-medium text-slate-600 mb-1">IBM bruto AFIP *</label>
+                    <input
+                      value={calcInputs.ibmBruto}
+                      onChange={e => setCalcInputs(p => ({ ...p, ibmBruto: e.target.value }))}
+                      placeholder="Ej: 43.369,60"
+                      className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                    <p className="text-xs text-slate-400 mt-0.5">Promedio últimos 12 meses</p>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-medium text-slate-600 mb-1">Edad del actor al accidente *</label>
+                    <input
+                      type="number"
+                      value={calcInputs.edadActor}
+                      onChange={e => setCalcInputs(p => ({ ...p, edadActor: e.target.value }))}
+                      placeholder="Ej: 37"
+                      className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-medium text-slate-600 mb-1">% de incapacidad total *</label>
+                    <input
+                      value={calcInputs.porcentajeIncapacidad}
+                      onChange={e => setCalcInputs(p => ({ ...p, porcentajeIncapacidad: e.target.value }))}
+                      placeholder="Ej: 3,8"
+                      className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                    <p className="text-xs text-slate-400 mt-0.5">Incluye factores de ponderación</p>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-medium text-slate-600 mb-1">Intereses tasa activa BNA *</label>
+                    <input
+                      value={calcInputs.intereseseBNA}
+                      onChange={e => setCalcInputs(p => ({ ...p, intereseseBNA: e.target.value }))}
+                      placeholder="Ej: 144.186,96"
+                      className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                    <button
+                      type="button"
+                      onClick={abrirCalculadorCABA}
+                      className="text-xs text-blue-600 hover:text-blue-800 underline mt-1 inline-block"
+                    >
+                      🔗 Abrir calculador del Consejo de la Magistratura CABA
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* HONORARIOS */}
               <div className="bg-white rounded-xl border border-slate-200 p-5">
                 <h3 className="font-medium text-slate-800 mb-1">Honorarios</h3>
                 <p className="text-xs text-slate-400 mb-4">Si los deja en blanco quedarán como [A COMPLETAR].</p>
@@ -488,13 +618,18 @@ export default function NewSentence({ profile, session }) {
                 ← Volver
               </button>
               <button
-                disabled={!ripteManual && !ripteAuto.valor}
+                disabled={(!ripteManual && !ripteAuto.valor) || !camposCalculoOK}
                 onClick={generate}
                 className="px-8 py-3 bg-blue-900 text-white rounded-xl font-semibold text-sm hover:bg-blue-800 transition-colors disabled:opacity-40 disabled:cursor-not-allowed shadow-md"
               >
                 ✍️ GENERAR PROYECTO DE SENTENCIA
               </button>
             </div>
+            {!camposCalculoOK && (
+              <p className="text-xs text-amber-600 mt-2 text-right">
+                ⚠ Faltan completar campos del cálculo de indemnización.
+              </p>
+            )}
           </div>
         )}
 
