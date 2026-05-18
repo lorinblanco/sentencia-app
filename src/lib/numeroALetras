@@ -1,0 +1,130 @@
+// src/lib/numeroALetras.js
+// =============================================================================
+// NÚMERO A LETRAS — Español Argentino (con soporte de centavos)
+// =============================================================================
+// Convierte montos en pesos a representación textual MAYÚSCULA al estilo
+// judicial argentino:
+//
+//   numeroALetras(4212470.13)
+//   → "CUATRO MILLONES DOSCIENTOS DOCE MIL CUATROCIENTOS SETENTA CON 13/100"
+//
+//   numeroALetras(4212470.13, { conPesos: true })
+//   → "PESOS CUATRO MILLONES DOSCIENTOS DOCE MIL CUATROCIENTOS SETENTA CON 13/100"
+//
+// =============================================================================
+
+const UNIDADES = ['', 'UNO', 'DOS', 'TRES', 'CUATRO', 'CINCO', 'SEIS', 'SIETE', 'OCHO', 'NUEVE'];
+const DIEZ_DIECINUEVE = ['DIEZ', 'ONCE', 'DOCE', 'TRECE', 'CATORCE', 'QUINCE', 'DIECISÉIS', 'DIECISIETE', 'DIECIOCHO', 'DIECINUEVE'];
+const DECENAS = ['', '', 'VEINTE', 'TREINTA', 'CUARENTA', 'CINCUENTA', 'SESENTA', 'SETENTA', 'OCHENTA', 'NOVENTA'];
+const CENTENAS = ['', 'CIENTO', 'DOSCIENTOS', 'TRESCIENTOS', 'CUATROCIENTOS', 'QUINIENTOS', 'SEISCIENTOS', 'SETECIENTOS', 'OCHOCIENTOS', 'NOVECIENTOS'];
+
+/** Convierte 0-999 a letras */
+function tresDigitos(n) {
+  if (n === 0) return '';
+  if (n === 100) return 'CIEN';
+  let resultado = '';
+  const c = Math.floor(n / 100);
+  const resto = n % 100;
+  if (c > 0) {
+    resultado += CENTENAS[c];
+    if (resto > 0) resultado += ' ';
+  }
+  if (resto > 0) {
+    if (resto < 10) {
+      resultado += UNIDADES[resto];
+    } else if (resto < 20) {
+      resultado += DIEZ_DIECINUEVE[resto - 10];
+    } else if (resto < 30) {
+      // Veinte: caso especial (veintiuno, veintidós, ...)
+      const u = resto - 20;
+      if (u === 0) resultado += 'VEINTE';
+      else resultado += 'VEINTI' + UNIDADES[u].toLowerCase().toUpperCase().replace('UNO', 'ÚN').replace('DOS', 'DÓS').replace('TRES', 'TRÉS').replace('SEIS', 'SÉIS');
+    } else {
+      const d = Math.floor(resto / 10);
+      const u = resto % 10;
+      resultado += DECENAS[d];
+      if (u > 0) {
+        resultado += ' Y ' + UNIDADES[u];
+      }
+    }
+  }
+  return resultado;
+}
+
+/** Convierte número entero positivo a letras */
+function enteroALetras(num) {
+  if (num === 0) return 'CERO';
+  if (num < 1000) return tresDigitos(num);
+  if (num < 1000000) {
+    const miles = Math.floor(num / 1000);
+    const resto = num % 1000;
+    let txt = '';
+    if (miles === 1) txt = 'MIL';
+    else txt = tresDigitos(miles) + ' MIL';
+    if (resto > 0) txt += ' ' + tresDigitos(resto);
+    return txt;
+  }
+  if (num < 1000000000) {
+    const millones = Math.floor(num / 1000000);
+    const resto = num % 1000000;
+    let txt = '';
+    if (millones === 1) txt = 'UN MILLÓN';
+    else txt = enteroALetras(millones) + ' MILLONES';
+    if (resto > 0) txt += ' ' + enteroALetras(resto);
+    return txt;
+  }
+  // Billones (10^9 en castellano corto = "mil millones"; en escala larga = "billón")
+  // Para uso judicial argentino se usa escala larga: 10^12 = billón.
+  // En la práctica, los montos rara vez pasan de mil millones, pero contemplamos:
+  if (num < 1e12) {
+    const milMillones = Math.floor(num / 1000000);
+    const resto = num % 1000000;
+    let txt = enteroALetras(milMillones) + ' MILLONES';
+    if (resto > 0) txt += ' ' + enteroALetras(resto);
+    return txt;
+  }
+  // Fallback para números absurdamente grandes
+  return num.toString();
+}
+
+/**
+ * Convierte un monto en pesos (con o sin decimales) a letras mayúsculas.
+ *
+ * @param {number} monto - El monto a convertir (ej: 4212470.13)
+ * @param {object} opts
+ * @param {boolean} opts.conPesos - Si true, antepone "PESOS " al texto
+ * @param {boolean} opts.conCentavos - Si true, agrega " CON XX/100" al final (default: true)
+ * @returns {string} Texto en MAYÚSCULAS
+ */
+export function numeroALetras(monto, opts = {}) {
+  const { conPesos = false, conCentavos = true } = opts;
+  if (monto == null || isNaN(monto)) return '';
+
+  const negativo = monto < 0;
+  const absMonto = Math.abs(monto);
+  const entero = Math.floor(absMonto);
+  const centavos = Math.round((absMonto - entero) * 100);
+
+  let texto = enteroALetras(entero);
+  if (conCentavos) {
+    const centStr = centavos.toString().padStart(2, '0');
+    texto += ` CON ${centStr}/100`;
+  }
+  if (conPesos) texto = 'PESOS ' + texto;
+  if (negativo) texto = 'MENOS ' + texto;
+
+  return texto;
+}
+
+/**
+ * Formato monetario argentino estándar: $ 1.234.567,89
+ */
+export function fmtMontoAR(monto) {
+  if (monto == null || isNaN(monto)) return '$ 0,00';
+  return '$ ' + monto.toLocaleString('es-AR', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+}
+
+export default numeroALetras;
