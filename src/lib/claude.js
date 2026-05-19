@@ -255,7 +255,7 @@ export function buildCalculos(config, datos) {
     esAccidente,
     edad,
     porcentaje,
-    fmt: {
+   fmt: {
       ibmBruto: fmtMontoAR(ibmBruto),
       intereseseBNA: fmtMontoAR(intereseseBNA),
       ibmConIntereses: fmtMontoAR(ibmConIntereses),
@@ -264,6 +264,9 @@ export function buildCalculos(config, datos) {
       hipotesisB: fmtMontoAR(hipotesisB),
       adicional20: fmtMontoAR(adicional20),
       total: fmtMontoAR(total),
+      // NUEVO v2.3: RIPTE formateado para evitar que el LLM lo reformatee mal
+      ripteActual: fmtMontoAR(ripteActual),
+      ripteAccidente: fmtMontoAR(ripteAccidente),
     },
   }
 }
