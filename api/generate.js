@@ -7,56 +7,40 @@
 // la API key vía header 'x-api-key'. Reenvía la request a Anthropic y devuelve
 // la respuesta tal cual.
 //
-// El cliente (src/lib/claude.js) orquesta las 5 llamadas en secuencia:
-//   1) extractBasicInfo  → JSON con datos del expediente
-//   2) antecedentes      → relato cronológico del proceso
-//   3) resolución        → pericia + incapacidad
-//   4) ibm               → ingreso base + cierre Primera Cuestión
-//   5) segunda           → cálculo + comparación BNA vs RIPTE + condena
-//   6) sentencia         → dispositivo final
-//
-// Toda la lógica de prompts, cálculos y detección de variantes vive en
-// src/lib/ (cliente). Este archivo NO importa nada de ahí — esa fue la causa
-// del FUNCTION_INVOCATION_FAILED en la versión anterior.
+// Runtime: Node.js serverless (NO edge) — permite maxDuration de hasta 60s
+// en plan Hobby (configurado en vercel.json). Edge functions limitan a 25s
+// la respuesta inicial, lo cual era insuficiente para las llamadas grandes
+// (segunda cuestión, sentencia dispositivo).
 // =============================================================================
 
-export const config = { runtime: 'edge' }
-
-export default async function handler(req) {
-  const cors = {
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'POST, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, x-api-key',
-    'Content-Type': 'application/json',
-  }
+export default async function handler(req, res) {
+  // CORS
+  res.setHeader('Access-Control-Allow-Origin', '*')
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS')
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-api-key')
 
   if (req.method === 'OPTIONS') {
-    return new Response(null, { status: 204, headers: cors })
+    return res.status(204).end()
   }
 
   if (req.method !== 'POST') {
-    return new Response(
-      JSON.stringify({ error: 'Method not allowed' }),
-      { status: 405, headers: cors },
-    )
+    return res.status(405).json({ error: 'Method not allowed' })
   }
 
   try {
-    const body = await req.json()
-    const apiKey = req.headers.get('x-api-key') || process.env.ANTHROPIC_API_KEY
+    const body = req.body
+    const apiKey = req.headers['x-api-key'] || process.env.ANTHROPIC_API_KEY
 
     if (!apiKey) {
-      return new Response(
-        JSON.stringify({ error: 'Missing API key (header x-api-key or env ANTHROPIC_API_KEY)' }),
-        { status: 401, headers: cors },
-      )
+      return res.status(401).json({
+        error: 'Missing API key (header x-api-key or env ANTHROPIC_API_KEY)',
+      })
     }
 
-    if (!body.messages || !Array.isArray(body.messages)) {
-      return new Response(
-        JSON.stringify({ error: 'Missing required field: messages (array)' }),
-        { status: 400, headers: cors },
-      )
+    if (!body || !body.messages || !Array.isArray(body.messages)) {
+      return res.status(400).json({
+        error: 'Missing required field: messages (array)',
+      })
     }
 
     const r = await fetch('https://api.anthropic.com/v1/messages', {
@@ -75,15 +59,9 @@ export default async function handler(req) {
     })
 
     const data = await r.json()
-    return new Response(JSON.stringify(data), {
-      status: r.status,
-      headers: cors,
-    })
+    return res.status(r.status).json(data)
   } catch (e) {
     console.error('Error en /api/generate:', e)
-    return new Response(
-      JSON.stringify({ error: e.message || 'Internal error' }),
-      { status: 500, headers: cors },
-    )
+    return res.status(500).json({ error: e.message || 'Internal error' })
   }
 }
