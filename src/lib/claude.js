@@ -280,8 +280,11 @@ export async function extractBasicInfo(apiKey, chunks) {
   const text = await callClaude(apiKey, prompt, 2500)
   try {
     const clean = text.replace(/```json|```/g, '').trim()
-    return JSON.parse(clean)
+    const json = JSON.parse(clean)
+    console.log('🔍 JSON extraído:', json)    // ← LÍNEA NUEVA
+    return json
   } catch {
+    console.error('🔍 Extract FAILED, raw:', text)   // ← LÍNEA NUEVA
     return { _parseError: true, raw: text }
   }
 }
