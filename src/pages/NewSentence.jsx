@@ -172,18 +172,52 @@ export default function NewSentence({ profile, session }) {
 
   // ── PARCHE: extracción anticipada al pasar al Paso 2 ────────────────────
   async function prefetchFromPDF() {
-    if (prefetchDone || prefetching) return
-    const apiKey = profile.anthropic_api_key
-    if (!apiKey) return                         // sin key no hay extracción
-    const expedientePDF = getExpedientePDF()
-    if (!expedientePDF) return
 
-    setPrefetching(true)
-    setPrefetchError('')
-    try {
-      const { fullText } = await extractAllText(expedientePDF.file)
-      const chunks = buildChunks(fullText, [])
-      setCachedChunks(chunks)                   // lo reutiliza generate()
+  if (prefetchDone || prefetching) return
+
+  const apiKey = profile.anthropic_api_key
+
+  if (!apiKey) return
+
+  const expedientePDF = getExpedientePDF()
+
+  if (!expedientePDF) return
+
+
+
+  setPrefetching(true)
+
+  setPrefetchError('')
+
+  try {
+
+    const { fullText } = await extractAllText(expedientePDF.file)
+
+
+
+    // NUEVO: validar antes de continuar
+
+    if (!fullText || fullText.trim().length < 100) {
+
+      throw new Error('No se pudo extraer texto del PDF')
+
+    }
+
+
+
+    const chunks = buildChunks(fullText, [])
+
+    setCachedChunks(chunks)
+
+
+
+    // NUEVO: validar chunks antes de llamar a la API
+
+    if (!chunks?.header) {
+
+      throw new Error('No se pudo procesar el encabezado del expediente')
+
+    }
 
       const data = await extractBasicInfo(apiKey, chunks)
       if (data._parseError) throw new Error('La IA no devolvió un JSON válido')
