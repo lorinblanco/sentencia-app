@@ -1,17 +1,15 @@
 // api/generate.js
 // =============================================================================
 // SENTENCIA - Proxy genérico para la API de Anthropic
-// Versión 2.2 - Mayo 2026
+// Versión 2.2.1 - Mayo 2026
 //
-// Recibe del cliente: { system, messages, max_tokens, model } y opcionalmente
-// la API key vía header 'x-api-key'. Reenvía la request a Anthropic y devuelve
-// la respuesta tal cual.
-//
-// Runtime: Node.js serverless (NO edge) — permite maxDuration de hasta 60s
-// en plan Hobby (configurado en vercel.json). Edge functions limitan a 25s
-// la respuesta inicial, lo cual era insuficiente para las llamadas grandes
-// (segunda cuestión, sentencia dispositivo).
+// Runtime: Node.js serverless. maxDuration declarado INLINE (no depende de
+// vercel.json) — Vercel a veces ignora el vercel.json en deploys parciales.
 // =============================================================================
+
+export const config = {
+  maxDuration: 60,
+}
 
 export default async function handler(req, res) {
   // CORS
@@ -26,6 +24,9 @@ export default async function handler(req, res) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' })
   }
+
+  // Log para confirmar runtime al revisar Vercel logs
+  console.log('[generate] runtime=node, maxDuration=60s')
 
   try {
     const body = req.body
@@ -43,6 +44,7 @@ export default async function handler(req, res) {
       })
     }
 
+    const startedAt = Date.now()
     const r = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
@@ -58,10 +60,13 @@ export default async function handler(req, res) {
       }),
     })
 
+    const elapsed = Date.now() - startedAt
+    console.log(`[generate] Claude responded in ${elapsed}ms with status ${r.status}`)
+
     const data = await r.json()
     return res.status(r.status).json(data)
   } catch (e) {
-    console.error('Error en /api/generate:', e)
+    console.error('[generate] Error:', e)
     return res.status(500).json({ error: e.message || 'Internal error' })
   }
 }
