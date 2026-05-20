@@ -1,8 +1,3 @@
 {
-  "regions": ["iad1"],
-  "functions": {
-    "api/generate.js": { "maxDuration": 60 },
-    "api/ripte.js":    { "maxDuration": 15 },
-    "api/tasa-bna.js": { "maxDuration": 15 }
-  }
+  "regions": ["iad1"]
 }
