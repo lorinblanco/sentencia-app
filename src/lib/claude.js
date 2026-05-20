@@ -1,15 +1,16 @@
 // src/lib/claude.js
 // =============================================================================
-// SentencIA - Claude API client v7 (post-Muzychuk SCBA)
+// SentencIA - Claude API client v8 (post-Muzychuk SCBA + Planilla CALM)
 // =============================================================================
-// Cambios respecto a v6:
-//   - El system prompt y los prompts por sección vienen de sentenciaPrompts.js
-//     (no más SYSTEM constante hardcoded, no más buildPrompt() acá).
-//   - Pre-calcula en JS: intereses BNA (input manual), coeficiente RIPTE,
-//     IBM actualizado, hipótesis A y B, total final, total en letras.
-//   - Detecta automáticamente la variante del voto de Weiss.
-//   - Sigue extrayendo el PDF localmente con PDF.js y enviando chunks
-//     (sin cambios en buildChunks() ni extractAllText()).
+// Cambios v7 → v8:
+//   - Integración con parseCalculador.js: si el usuario sube la planilla del
+//     CALM como archivo extra, se parsea directamente (sin LLM) y se usan
+//     esos valores como fuente de verdad para todos los cálculos.
+//   - Nueva función detectarEsEnfermedad() que combina extract LLM + keywords
+//     en chunks.header para detectar enfermedad profesional aunque el LLM
+//     falle (caso JARA).
+//   - buildCalculos() ahora acepta un tercer parámetro opcional `calmParsed`
+//     y delega en adaptToCalculos() cuando está disponible.
 // =============================================================================
 
 import {
@@ -24,9 +25,10 @@ import {
 } from './sentenciaPrompts'
 
 import { numeroALetras, fmtMontoAR } from './numeroALetras'
+import { parseCalculadorCALM, adaptToCalculos, esPlanillaCALM } from './parseCalculador'
 
 // =============================================================================
-// PDF.js loader (sin cambios respecto a v6)
+// PDF.js loader (sin cambios)
 // =============================================================================
 
 async function loadPdfjs() {
@@ -70,7 +72,7 @@ export async function extractAllText(file, onProgress) {
 }
 
 // =============================================================================
-// CHUNKING (sin cambios respecto a v6)
+// CHUNKING (sin cambios)
 // =============================================================================
 
 export function buildChunks(fullText, extraTexts = []) {
@@ -91,10 +93,8 @@ export function buildChunks(fullText, extraTexts = []) {
     return fullText.slice(Math.max(0, start), Math.min(len, start + size))
   }
 
-  // Header: primeros 25k chars
   const header = fullText.slice(0, Math.min(25000, Math.floor(len * 0.15)))
 
-  // Pericia
   let periIdx = find([
     'flexion disminuida', 'flexión disminuida',
     'movimientos de flexion', 'movimientos de flexión',
@@ -107,27 +107,26 @@ export function buildChunks(fullText, extraTexts = []) {
     'escala de beck', 'escala de hamilton',
     'hamilton:', 'beck:',
     'examen pericial', 'examen fisico pericial',
-    'practico el examen', 'practicó el examen'
+    'practico el examen', 'practicó el examen',
   ])
   if (periIdx < 0) periIdx = find([
     'dictamino', 'dictaminó',
     'perito medico designado', 'el galeno determino',
     'segun el baremo', 'conforme el baremo',
     'incapacidad parcial y permanente del',
-    't.o. por'
+    't.o. por',
   ])
   const pericia = periIdx > 0
     ? slice(periIdx - 3000, 22000)
     : fullText.slice(Math.floor(len * 0.40), Math.floor(len * 0.40) + 22000)
 
-  // AFIP/IBM
   let afipIdx = find([
     'vib (ripte)', 'v.i.b. (ripte)',
     'ripte del periodo', 'ripte del período',
     'salario actualizado', 'salarios actualizados',
     'valor ingreso base', 'ingreso base mensual',
     'remuneraciones informadas por afip',
-    '202103', '202101', '202201', '202301', '202401', '202501'
+    '202103', '202101', '202201', '202301', '202401', '202501',
   ])
   if (afipIdx < 0) afipIdx = find(['afip', 'ripte'])
 
@@ -141,11 +140,10 @@ export function buildChunks(fullText, extraTexts = []) {
            '\n\n=== TEXTO DEL EXPEDIENTE ===\n\n' + afip
   }
 
-  // Alegatos
   const alegIdx = find([
     'presenta alegato', 'presentó su alegato',
     'presento su alegato', 'ha quedado probado',
-    'han quedado probados'
+    'han quedado probados',
   ])
   const alegatos = alegIdx > 0
     ? slice(alegIdx - 2000, 20000)
@@ -157,7 +155,78 @@ export function buildChunks(fullText, extraTexts = []) {
 }
 
 // =============================================================================
-// CALL CLAUDE (proxy al endpoint /api/generate existente)
+// PLANILLA CALM — detección y parsing
+// =============================================================================
+
+/**
+ * Intenta detectar y parsear un archivo como planilla del CALM.
+ * Devuelve el resultado del parser, o null si el archivo no es una planilla CALM.
+ *
+ * @param {File} file
+ * @returns {Promise<object|null>}
+ */
+export async function tryParsePlanillaCALM(file) {
+  const ext = file.name.split('.').pop().toLowerCase()
+  if (ext !== 'xlsx' && ext !== 'xlsm') return null
+
+  try {
+    const parsed = await parseCalculadorCALM(file)
+    // Si esPlanillaCALM falla, parseCalculadorCALM throwea — acá ya validamos
+    return parsed
+  } catch (e) {
+    console.log('[CALM] Archivo Excel no es planilla del CALM:', e.message)
+    return null
+  }
+}
+
+// =============================================================================
+// DETECCIÓN DUAL: ¿es enfermedad profesional?
+// =============================================================================
+
+/**
+ * Detecta si el caso es enfermedad profesional combinando:
+ *   1) Lo que extrajo el LLM en `tipo_accion_detectado`
+ *   2) Keywords específicas en el chunk header del expediente
+ *
+ * Default: accidente (false).
+ *
+ * @param {object} chunks  Resultado de buildChunks()
+ * @param {object} datos   JSON del extract LLM
+ * @returns {boolean} true si es enfermedad profesional
+ */
+export function detectarEsEnfermedad(chunks, datos) {
+  // Fuente 1: extract LLM
+  const tipoLLM = (
+    datos?.tipo_accion_detectado || datos?.tipo_accion || ''
+  ).toUpperCase()
+
+  if (tipoLLM.includes('ENFERMEDAD')) return true
+  if (tipoLLM.includes('ACCIDENTE')) return false
+
+  // Fuente 2: keywords en el chunk header (fallback robusto)
+  const headerLower = (chunks?.header || '').toLowerCase()
+  const indicadoresEnfermedad = [
+    's/ enfermedad profesional',
+    'materia: inicio demanda laboral por enfermedad profesional',
+    'enfermedad profesional - acción especial',
+    'enfermedad profesional - accion especial',
+    'inicio demanda laboral por enfermedad profesional',
+    'enfermedad profesional ley',
+    'covid-19',
+    'covid 19',
+    'enfermedad-accidente',
+    'dnu 367/2020',
+  ]
+  for (const indicador of indicadoresEnfermedad) {
+    if (headerLower.includes(indicador)) return true
+  }
+
+  // Default: accidente
+  return false
+}
+
+// =============================================================================
+// CALL CLAUDE (sin cambios)
 // =============================================================================
 
 async function callClaude(apiKey, userPrompt, maxTokens = 4000) {
@@ -172,27 +241,21 @@ async function callClaude(apiKey, userPrompt, maxTokens = 4000) {
   })
   const txt = await res.text()
   let data
-  try {
-    data = JSON.parse(txt)
-  } catch {
-    throw new Error(`Respuesta inválida (${res.status}): ${txt.slice(0, 200)}`)
-  }
-  if (!res.ok) {
-    throw new Error(data.error?.message || data.error || `Error HTTP ${res.status}`)
-  }
+  try { data = JSON.parse(txt) }
+  catch { throw new Error(`Respuesta inválida (${res.status}): ${txt.slice(0, 200)}`) }
+  if (!res.ok) throw new Error(data.error?.message || data.error || `Error HTTP ${res.status}`)
   if (data.error) throw new Error(data.error.message || JSON.stringify(data.error))
   if (!data.content?.[0]?.text) throw new Error('Respuesta vacía de la API')
   return data.content[0].text
 }
 
 // =============================================================================
-// PRE-CÁLCULOS NUMÉRICOS (JavaScript, no Claude)
+// PRE-CÁLCULOS NUMÉRICOS (con soporte de planilla CALM)
 // =============================================================================
 
 function parseMonto(s) {
   if (typeof s === 'number') return s
   if (!s) return null
-  // "198.241,70" o "$198.241,70" → 198241.70
   const cleaned = s.toString().replace(/[$\s]/g, '').replace(/\./g, '').replace(',', '.')
   const n = parseFloat(cleaned)
   return isNaN(n) ? null : n
@@ -206,9 +269,32 @@ function calcIndemnizacion(ibm, edad, porcentaje) {
 
 /**
  * Construye el objeto "calculos" que se pasa a los prompts.
- * Devuelve null si falta info crítica (lo cual indica caso de RECHAZO).
+ *
+ * Si recibe `calmParsed` con esValida=true, delega en adaptToCalculos()
+ * (los números vienen 100% de la planilla del CALM, sin recalcular).
+ *
+ * En caso contrario, hace el cálculo manual original (multiplicación con
+ * coeficiente único — el método legacy).
+ *
+ * Devuelve null si faltan datos críticos (caso RECHAZO).
+ *
+ * @param {object} config        Config del wizard (form de Paso 2)
+ * @param {object} datos         JSON del extract LLM
+ * @param {object} [calmParsed]  Resultado de parseCalculadorCALM (opcional)
+ * @param {boolean} [esEnfermedad] Si se conoce el tipo, pasarlo
  */
-export function buildCalculos(config, datos) {
+export function buildCalculos(config, datos, calmParsed = null, esEnfermedad = null) {
+  // === CASO PREFERIDO: hay planilla CALM válida ===
+  if (calmParsed && calmParsed.esValida) {
+    // Si no nos pasaron explícitamente el tipo, lo detectamos desde datos
+    const esEnf = esEnfermedad != null
+      ? esEnfermedad
+      : (datos?.tipo_accion_detectado || datos?.tipo_accion || '').toUpperCase().includes('ENFERMEDAD')
+
+    return adaptToCalculos(calmParsed, !esEnf)
+  }
+
+  // === CASO LEGACY: cálculo manual desde el config ===
   const ripteActual = parseMonto(config.ripte_actual)
   const ripteAccidente = parseMonto(config.ripte_accidente)
   const intereseseBNA = parseMonto(config.intereses_bna)
@@ -218,14 +304,8 @@ export function buildCalculos(config, datos) {
     || datos?.pericia_medica?.incapacidad_total_perito
     || datos?.pericia_medica?.incapacidad_fisica_porcentaje
 
-  // Si falta cualquier dato crítico, no se puede calcular (rechazo)
-  if (!ripteActual || !ripteAccidente || ibmBruto == null || !edad || !porcentaje) {
-    return null
-  }
-  if (intereseseBNA == null) {
-    // Faltan los intereses BNA: el usuario debe completarlos
-    return null
-  }
+  if (!ripteActual || !ripteAccidente || ibmBruto == null || !edad || !porcentaje) return null
+  if (intereseseBNA == null) return null
 
   const coefRipte = ripteActual / ripteAccidente
   const ibmConIntereses = ibmBruto + intereseseBNA
@@ -233,8 +313,11 @@ export function buildCalculos(config, datos) {
   const ibmRIPTE = ibmBruto * coefRipte
   const hipotesisB = calcIndemnizacion(ibmRIPTE, edad, porcentaje)
 
-  const tipoEvento = (datos?.tipo_accion_detectado || datos?.tipo_accion || 'ACCIDENTE').toUpperCase()
-  const esAccidente = !tipoEvento.includes('ENFERMEDAD')
+  // Usar esEnfermedad explícito si vino; si no, inferir de datos
+  const esEnf = esEnfermedad != null
+    ? esEnfermedad
+    : (datos?.tipo_accion_detectado || datos?.tipo_accion || 'ACCIDENTE').toUpperCase().includes('ENFERMEDAD')
+  const esAccidente = !esEnf
   const adicional20 = esAccidente ? hipotesisB * 0.20 : 0
   const total = hipotesisB + adicional20
   const totalEnLetras = numeroALetras(total, { conPesos: true })
@@ -255,7 +338,8 @@ export function buildCalculos(config, datos) {
     esAccidente,
     edad,
     porcentaje,
-   fmt: {
+    fuente: 'calculo_manual',
+    fmt: {
       ibmBruto: fmtMontoAR(ibmBruto),
       intereseseBNA: fmtMontoAR(intereseseBNA),
       ibmConIntereses: fmtMontoAR(ibmConIntereses),
@@ -264,7 +348,6 @@ export function buildCalculos(config, datos) {
       hipotesisB: fmtMontoAR(hipotesisB),
       adicional20: fmtMontoAR(adicional20),
       total: fmtMontoAR(total),
-      // NUEVO v2.3: RIPTE formateado para evitar que el LLM lo reformatee mal
       ripteActual: fmtMontoAR(ripteActual),
       ripteAccidente: fmtMontoAR(ripteAccidente),
     },
@@ -272,7 +355,7 @@ export function buildCalculos(config, datos) {
 }
 
 // =============================================================================
-// EXTRACCIÓN DE DATOS BÁSICOS (paso 1)
+// EXTRACT (sin cambios estructurales — solo se mantiene el log para debug)
 // =============================================================================
 
 export async function extractBasicInfo(apiKey, chunks) {
@@ -281,49 +364,42 @@ export async function extractBasicInfo(apiKey, chunks) {
   try {
     const clean = text.replace(/```json|```/g, '').trim()
     const json = JSON.parse(clean)
-    console.log('🔍 JSON extraído:', json)    // ← LÍNEA NUEVA
+    console.log('🔍 JSON extraído:', json)
     return json
   } catch {
-    console.error('🔍 Extract FAILED, raw:', text)   // ← LÍNEA NUEVA
+    console.error('🔍 Extract FAILED, raw:', text)
     return { _parseError: true, raw: text }
   }
 }
 
 // =============================================================================
-// GENERACIÓN DE SECCIONES (pasos 2-5)
+// GENERATE SECTION (sin cambios)
 // =============================================================================
 
 export async function generateSection(apiKey, sectionType, chunks, data, config, calculos = null) {
   let userPrompt
   switch (sectionType) {
-    case 'antecedentes':
-      userPrompt = buildAntecedentesUserPrompt(chunks, data, config)
-      break
-    case 'resolucion':
-      userPrompt = buildResolucionUserPrompt(chunks, data, config)
-      break
-    case 'ibm':
-      userPrompt = buildIbmUserPrompt(chunks, data, config, calculos)
-      break
-    case 'segunda':
-      userPrompt = buildSegundaUserPrompt(chunks, data, config, calculos)
-      break
-    case 'sentencia':
-      userPrompt = buildSentenciaUserPrompt(chunks, data, config, calculos)
-      break
-    default:
-      throw new Error(`Sección desconocida: ${sectionType}`)
+    case 'antecedentes': userPrompt = buildAntecedentesUserPrompt(chunks, data, config); break
+    case 'resolucion':   userPrompt = buildResolucionUserPrompt(chunks, data, config); break
+    case 'ibm':          userPrompt = buildIbmUserPrompt(chunks, data, config, calculos); break
+    case 'segunda':      userPrompt = buildSegundaUserPrompt(chunks, data, config, calculos); break
+    case 'sentencia':    userPrompt = buildSentenciaUserPrompt(chunks, data, config, calculos); break
+    default: throw new Error(`Sección desconocida: ${sectionType}`)
   }
-
   const maxTokens = sectionType === 'segunda' || sectionType === 'sentencia' ? 6000 : 4500
   return await callClaude(apiKey, userPrompt, maxTokens)
 }
 
-// Re-export para conveniencia
+// Re-exports para conveniencia
 export { detectarVarianteWeiss } from './sentenciaPrompts'
+export { parseCalculadorCALM, adaptToCalculos, esPlanillaCALM } from './parseCalculador'
 
 // =============================================================================
-// LECTURA DE ARCHIVOS EXTRA (sin cambios respecto a v6)
+// LECTURA DE ARCHIVOS EXTRA
+// =============================================================================
+// IMPORTANTE: si el archivo es una planilla CALM, NO se debe procesar acá
+// (el chunk afip no la necesita como texto plano). La detección se hace en
+// NewSentence.jsx via tryParsePlanillaCALM() antes de invocar esta función.
 // =============================================================================
 
 export async function extractExtraFileText(file) {
@@ -334,7 +410,7 @@ export async function extractExtraFileText(file) {
     return `[Archivo: ${file.name}]\n${result.fullText.slice(0, 10000)}`
   }
 
-  if (ext === 'xlsx' || ext === 'xls') {
+  if (ext === 'xlsx' || ext === 'xls' || ext === 'xlsm') {
     if (!window.XLSX) {
       await new Promise((resolve, reject) => {
         const s = document.createElement('script')
