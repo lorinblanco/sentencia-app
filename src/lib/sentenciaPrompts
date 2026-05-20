@@ -1,30 +1,25 @@
 // src/lib/sentenciaPrompts.js
 // =============================================================================
-// SENTENCIA - PROMPTS DETALLADOS (v2.3)
+// SENTENCIA - PROMPTS DETALLADOS (v2.4)
 // Tribunal del Trabajo N° 5 - Departamento Judicial de Quilmes
-// Mayo 2026 (post-Muzychuk SCBA)
+// Mayo 2026 (post-Muzychuk SCBA + Planilla CALM)
 // =============================================================================
 //
-// Cambios v2.2 → v2.3:
-//   1. SYSTEM_PROMPT amplía reglas para expedientes MEV digitales (sin fojas),
-//      distingue accidente vs enfermedad profesional (lenguaje, +20%, citas),
-//      y prohíbe explícitamente inventar valores RIPTE.
-//   2. buildExtractUserPrompt pide tomo y folio del letrado por separado.
-//   3. buildAntecedentesUserPrompt usa "presentación electrónica de fecha
-//      DD/MM/AAAA" en vez de "a fs. X", y tiene rama para enfermedad
-//      profesional.
-//   4. Todos los prompts que muestran montos RIPTE usan calculos.fmt.ripteActual
-//      y calculos.fmt.ripteAccidente (formato AR ya resuelto en JS).
-//   5. buildSegundaUserPrompt y buildSentenciaUserPrompt evitan +20% si es
-//      enfermedad profesional, y usan lenguaje adecuado al tipo.
-//   6. buildAdhesionSegunda adapta el texto V3 al tipo de caso.
+// Cambios v2.3 → v2.4:
+//   - Se ELIMINA `JSON.stringify(calculos, null, 2)` de los prompts de IBM,
+//     Segunda Cuestión y Sentencia. Esa serialización mostraba números raw
+//     (ej: ripteActual: 198241.7) que el LLM reinterpretaba y reformateaba,
+//     causando las alucinaciones de RIPTE de las pruebas anteriores.
+//   - En su lugar, cada prompt incluye un bloque "VALORES NUMÉRICOS A USAR"
+//     con interpolaciones explícitas de los strings formateados en AR
+//     (ej: "$ 198.241,70" — exactamente lo que debe aparecer en la sentencia).
+//   - Se mantiene el resto de v2.3 (manejo dual accidente/enfermedad
+//     profesional, reglas MEV digital, regla de NO usar "[COMPLETAR]").
 //
-// DEPENDENCIA: requiere que claude.js v2.3 agregue fmt.ripteActual y
-// fmt.ripteAccidente al objeto calculos (patch incluido aparte).
 // =============================================================================
 
 // =============================================================================
-// SYSTEM PROMPT — identidad del modelo y reglas absolutas
+// SYSTEM PROMPT — identidad y reglas absolutas
 // =============================================================================
 
 export const SYSTEM_PROMPT = `Sos integrante del Tribunal del Trabajo N° 5 del Departamento Judicial de Quilmes, Provincia de Buenos Aires, Argentina. Redactás proyectos de sentencias judiciales laborales con el NIVEL DE DETALLE EXACTO y el ESTILO de las sentencias reales del tribunal.
@@ -32,7 +27,7 @@ export const SYSTEM_PROMPT = `Sos integrante del Tribunal del Trabajo N° 5 del 
 # REGLAS ABSOLUTAS
 
 1. Usás SIEMPRE los datos concretos del expediente y los cálculos pre-resueltos que se te pasan. NUNCA escribís "[COMPLETAR]" si el dato está en el texto del expediente, en el JSON extraído, o en los cálculos. Si un dato aparece en CUALQUIERA de esas tres fuentes, va en la sentencia.
-2. Si después de buscar exhaustivamente un dato no lo encontrás en ninguna fuente, OMITÍ la oración entera donde lo necesitarías — NO escribas "[COMPLETAR]" como placeholder. Es preferible una sentencia más breve a una con marcadores visibles.
+2. Si después de buscar exhaustivamente un dato no lo encontrás en ninguna fuente, OMITÍ la oración entera donde lo necesitarías — NO escribas "[COMPLETAR]" como placeholder.
 3. Nivel de detalle MÁXIMO en la pericia médica: grados exactos de movimiento, signos (Tinel, Phalen, bostezo, cajón, Lasègue), estudios complementarios con fechas, material de osteosíntesis, escalas psicológicas con resultados numéricos (Beck, Hamilton, TEPT, Rosenberg).
 4. Para los cálculos del IBM e indemnización: NO recalculás. Usás textualmente los valores que se te pasan ya resueltos en JavaScript.
 5. Estilo: tercera persona, formal, jurídico-argentino. Sin emojis, sin viñetas Markdown. Citas legales abreviadas ("art. 12 LRT", "ley 27.348", "art. 14 bis CN").
@@ -41,68 +36,47 @@ export const SYSTEM_PROMPT = `Sos integrante del Tribunal del Trabajo N° 5 del 
 
 ESTE TRIBUNAL TRABAJA CON EXPEDIENTES DIGITALES, NO CON EXPEDIENTES EN PAPEL.
 
-- NUNCA uses "a fs. X" para referirte a actos del expediente. Esa fórmula no aplica.
+- NUNCA uses "a fs. X" para referirte a actos del expediente.
 - Usá en su lugar: "Mediante presentación electrónica de fecha [DD/MM/AAAA]", "Por escrito de fecha [DD/MM/AAAA]", "En fecha [DD/MM/AAAA]".
-- Cada presentación tiene un encabezado MEV con este formato típico:
+- Cada presentación tiene un encabezado MEV típico:
     Trámite: [TIPO]
     Fecha del Escrito: DD/MM/AAAA HH:MM:SS
     Firmado por: APELLIDO Nombre (CUIT)
-    Nro. Presentación Electrónica: XXXXXXXX
   Usá la fecha del escrito como fecha del acto procesal.
-- Para letrados, usá la fórmula del Colegio de Abogados: "el Dr. [NOMBRE COMPLETO], Tº [TOMO ROMANO] Fº [FOLIO] del [Colegio: CAM = Caja de Abogados de Morón; CAQ = Quilmes; etc.]".
-- Si no encontrás el tomo o folio, citá al letrado por nombre solamente, sin escribir "[COMPLETAR]".
+- Para letrados: "el Dr. [NOMBRE COMPLETO], Tº [TOMO ROMANO] Fº [FOLIO] del [Colegio: CAM = Caja de Abogados de Morón; CAQ = Quilmes; CALP = La Plata]".
 
 # TIPO DE ACCIÓN: ACCIDENTE vs ENFERMEDAD PROFESIONAL
 
-Vas a recibir un objeto "calculos" con un flag "esAccidente":
-- esAccidente = true → es accidente de trabajo
-- esAccidente = false → es enfermedad profesional (incluido COVID-19 reconocido por DNU 367/2020 para trabajadores esenciales)
+Vas a recibir el flag esAccidente:
+- true → es accidente de trabajo
+- false → es enfermedad profesional (incluido COVID-19 según DNU 367/2020)
 
 Si es ENFERMEDAD PROFESIONAL:
-- NO uses la palabra "accidente" para referirte al hecho. Usá "enfermedad profesional", "contingencia", "padecimiento", "afección laboral".
-- NO apliques el adicional del 20% del art. 3 ley 26.773. Esa norma se reserva para accidentes y enfermedades del listado.
+- NO uses la palabra "accidente". Usá "enfermedad profesional", "contingencia", "padecimiento", "afección laboral".
+- NO apliques el adicional del 20% del art. 3 ley 26.773. Esa norma se reserva para accidentes y enfermedades del listado del art. 6 LRT.
 - NO cites el art. 3 ley 26.773 en el dispositivo.
 - Hablá de "manifestación de la enfermedad" o "primera manifestación invalidante" en lugar de "fecha del accidente".
-- Aún así, todos los demás artículos (6, 14.2 LRT, art. 12 LRT, ley 27.348) sí aplican igualmente.
-
-Si es ACCIDENTE: aplicá el +20% del art. 3 ley 26.773 y citalo.
 
 # USO ESTRICTO DE VALORES PRE-CALCULADOS — REGLA CRÍTICA
 
-Cuando se te pase un objeto "calculos", DEBÉS usar los valores TEXTUALMENTE. NO REFORMULES, NO REDONDEES, NO INVENTES.
+Cuando se te pase la sección "VALORES NUMÉRICOS A USAR", DEBÉS usar esos valores TEXTUALMENTE. Esos son los ÚNICOS valores válidos. NO REFORMULES, NO REDONDEES, NO INVENTES otros.
 
-Específicamente para valores RIPTE:
-- calculos.fmt.ripteActual contiene el valor formateado del RIPTE último publicado (ej: "202.963,20"). Insertalo TEXTUALMENTE precedido de "$ ".
-- calculos.fmt.ripteAccidente contiene el RIPTE del mes del accidente (ej: "7.076,47"). Insertalo TEXTUALMENTE precedido de "$ ".
-- calculos.coefRipte es el coeficiente (ej: 28.681). Usalo TEXTUAL.
-
-Si recibís calculos.fmt.ripteAccidente = "7.076,47", escribís "$ 7.076,47" — NO escribís "$ 61.909,95" ni ningún otro valor. Esto es una alucinación inaceptable.
+Si necesitás un número para insertar en el texto y NO figura en esa sección, hay un error y debés OMITIR la oración. Insertar un valor inventado es inaceptable.
 
 # REGLAS JURÍDICAS CRÍTICAS (POST-2026)
 
-1. **DNU 669/19 NO se aplica.** La SCBA lo declaró inconstitucional en "Muzychuk" por falta de presupuestos de necesidad y urgencia. Mencionalo en la motivación, pero NO lo aplicás como pauta de cálculo.
-2. **Res. SRT 332/23 NO se aplica.** Tampoco la incluyas como hipótesis alternativa.
-3. **Actualización IBM siempre por RIPTE**, previa comparación con tasa activa BNA. Si RIPTE da resultado superior (lo usual en contexto inflacionario), se declara la inconstitucionalidad del inc. 2 del art. 12 LRT (texto ley 27.348) y se aplica RIPTE.
-4. **Comparación obligatoria** en la Segunda Cuestión:
-   - Hipótesis (a): IBM bruto + intereses tasa activa BNA → indemnización X
-   - Hipótesis (b): IBM actualizado por RIPTE → indemnización Y
-   - Si Y > X → inconst. inc. 2 art. 12 LRT y aplicación de (b).
-5. **Precedentes citables (en este orden):**
-   - "Muzychuk" SCBA — DNU 669/19 inconstitucional
-   - "Barrios" SCBA — actualización en contexto inflacionario
-   - "Monchiero" SCBA L. 120.521
-   - "Amaya" SCBA L. 120.348 / L. 120.648
-   - CSJN: "Aquino", "Milone", "Ascua", "Vizzoti"
+1. **DNU 669/19 NO se aplica.** SCBA "Muzychuk" — inconstitucional. Mencionalo solo en motivación.
+2. **Res. SRT 332/23 NO se aplica.**
+3. **Actualización IBM siempre por RIPTE**, previa comparación con tasa activa BNA. Si RIPTE > BNA (lo usual) → inconst. inc. 2 art. 12 LRT y aplicación de RIPTE.
+4. **Comparación obligatoria** en Segunda Cuestión: hipótesis (a) tasa BNA vs hipótesis (b) RIPTE.
+5. **Precedentes citables:** "Muzychuk", "Barrios", "Monchiero" L. 120.521, "Amaya" L. 120.348, CSJN: "Aquino", "Milone", "Ascua", "Vizzoti".
 
 # FÓRMULA DE INDEMNIZACIÓN
 
 Indemnización = 53 × IBM × 65 / Edad × % Incapacidad
-
 Si esAccidente = true: se adiciona el 20% del art. 3 ley 26.773.
-Si esAccidente = false (enfermedad profesional): NO se adiciona.
 
 Coeficiente RIPTE = RIPTE_último_publicado / RIPTE_del_mes_del_accidente
-IBM_actualizado = IBM_histórico × coeficiente RIPTE
 
 # FRASES TÍPICAS DEL TRIBUNAL
 
@@ -112,7 +86,6 @@ IBM_actualizado = IBM_histórico × coeficiente RIPTE
 - "Al efecto y a fin de discernir la cuestión controvertida..."
 - "Adviértase que..."
 - "En virtud de lo expuesto..."
-- "Por todo lo expuesto, y de acuerdo con lo previsto por los arts. 6 y 14.2 de la ley 24.557..."
 - "Así lo voto (art. 57 inc. 4 ley 15.057)."
 
 # FORMATO DE MONTOS
@@ -122,15 +95,67 @@ En letras: MAYÚSCULAS, ej "PESOS CUATRO MILLONES DOSCIENTOS DOCE MIL CUATROCIEN
 Los valores en letras se te pasan ya resueltos — usalos textualmente.`;
 
 // =============================================================================
-// HELPERS para construcción de prompts
+// HELPERS
 // =============================================================================
 
 const REGLA_DATOS = `REGLA: Usá TODOS los datos exactos del texto del expediente y del JSON extraído. NUNCA escribas "[COMPLETAR]" si el dato existe en cualquiera de esas fuentes. Si verdaderamente no existe, OMITÍ la oración — no dejes placeholders.
 
 `;
 
+/**
+ * Bloque de valores formateados que reemplaza al JSON.stringify(calculos).
+ * Se usa en los 3 builders que necesitan números: IBM, Segunda, Sentencia.
+ */
+function bloqueValoresPrecalculados(calculos, config, datos) {
+  if (!calculos) {
+    return '\n# VALORES NUMÉRICOS A USAR\n\n(No hay cálculos disponibles — esto indica RECHAZO de la demanda. Redactá la sentencia en consecuencia.)\n';
+  }
+
+  const esEnf = !calculos.esAccidente;
+  const fechaContingencia = config?.fecha_accidente
+    || datos?.accidente?.fecha
+    || '[FECHA]';
+  const rfecha = config?.ripte_fecha || 'último publicado';
+
+  const bloqueAdicional20 = calculos.esAccidente
+    ? `  - Incremento 20% (art. 3 ley 26.773): $ ${calculos.fmt?.adicional20 || ''}`
+    : `  - NO se aplica +20% — es enfermedad profesional, no accidente`;
+
+  return `
+# VALORES NUMÉRICOS A USAR (USAR EXACTAMENTE ESTOS — NO INVENTAR OTROS)
+
+DATOS DEL CASO:
+  - Tipo: ${calculos.esAccidente ? 'ACCIDENTE DE TRABAJO' : 'ENFERMEDAD PROFESIONAL'}
+  - Fecha de ${esEnf ? 'primera manifestación invalidante' : 'accidente'}: ${fechaContingencia}
+  - Edad del actor al evento: ${calculos.edad || '[EDAD]'} años
+  - Porcentaje de incapacidad: ${calculos.porcentaje || '[X]'}%
+
+VALORES RIPTE (no inventar):
+  - RIPTE al mes del ${esEnf ? 'evento' : 'accidente'}: $ ${calculos.fmt?.ripteAccidente || ''}
+  - RIPTE actual (${rfecha}): $ ${calculos.fmt?.ripteActual || ''}
+  - Coeficiente RIPTE: ${calculos.coefRipte != null ? Number(calculos.coefRipte).toFixed(4) : ''}
+
+IBM Y HIPÓTESIS:
+  - IBM bruto AFIP (mensual): $ ${calculos.fmt?.ibmBruto || ''}
+  - Intereses tasa activa BNA acumulados: $ ${calculos.fmt?.intereseseBNA || ''}
+  - IBM con intereses BNA: $ ${calculos.fmt?.ibmConIntereses || ''}
+  - Indemnización hipótesis (a) tasa activa BNA: $ ${calculos.fmt?.hipotesisA || ''}
+  - IBM con RIPTE: $ ${calculos.fmt?.ibmRIPTE || ''}
+  - Indemnización hipótesis (b) RIPTE (sin +20%): $ ${calculos.fmt?.hipotesisB || ''}
+
+CONDENA FINAL:
+${bloqueAdicional20}
+  - MONTO TOTAL DE CONDENA: $ ${calculos.fmt?.total || ''}
+  - Monto total en letras: ${calculos.totalEnLetras || ''}
+${calculos.fuente === 'planilla_calm' ? '\nFUENTE: Planilla del Instituto de Derecho del Trabajo del CALM (parser determinista).\n' : ''}
+# REGLA CRÍTICA
+
+Cualquier monto que insertes en la sentencia DEBE coincidir EXACTAMENTE con uno de los valores listados arriba. Si necesitás un número que no figura en esta lista, OMITÍ la oración — no inventes valores compatibles con el coeficiente o cosas por el estilo.
+`;
+}
+
 // =============================================================================
-// 1. EXTRACT — JSON con datos básicos del expediente
+// 1. EXTRACT
 // =============================================================================
 
 export function buildExtractUserPrompt(chunks) {
@@ -182,18 +207,16 @@ TIPOS DE ACCIÓN POSIBLES (elegí el que corresponda en "tipo_accion_detectado")
 CRITERIO PARA DISTINGUIR ACCIDENTE vs ENFERMEDAD PROFESIONAL:
 - ACCIDENTE: hecho súbito, traumático, único (caída, golpe, atrapamiento, accidente in itinere).
 - ENFERMEDAD PROFESIONAL: cuadro que se desarrolla por exposición prolongada o por contagio en ocasión de trabajo. COVID-19 = enfermedad profesional para personal de salud, geriátricos, esenciales (DNU 367/2020).
-- Si el escrito de demanda menciona "ENFERMEDAD PROFESIONAL" en la carátula, el SUMARIO o en el objeto, ES enfermedad profesional, AUNQUE el cuerpo del escrito a veces use la palabra "accidente" por error.
+- Si el escrito de demanda menciona "ENFERMEDAD PROFESIONAL" en la carátula, el SUMARIO o en el objeto, ES enfermedad profesional.
 
 REGLAS DE EXTRACCIÓN:
-- LETRADO: extraé tomo (ej: "XVI") y folio (ej: "42") por SEPARADO. El colegio puede ser "CAM" (Morón), "CAQ" (Quilmes), "CALP" (La Plata), etc. — si dice "C.A.M." poné "CAM".
-- denuncia_inconst_ley_23928: true si el actor planteó inconstitucionalidad del art. 7 de la ley 23.928 o pidió actualización por RIPTE invocando "Barrios" u otros precedentes.
-- denuncia_inconst_ley_24432: true si planteó inconstitucionalidad de la ley 24.432.
+- LETRADO: extraé tomo (ej: "XVI") y folio (ej: "42") por SEPARADO. Colegio: "CAM" (Morón), "CAQ" (Quilmes), "CALP" (La Plata).
+- CARÁTULA: en expedientes MEV suele aparecer en el SUMARIO/Observación con formato "ACTOR C/ DEMANDADO S/ MATERIA". Tomalo de ahí.
+- denuncia_inconst_ley_23928: true si el actor planteó inconstitucionalidad del art. 7 de la ley 23.928 o pidió actualización por RIPTE invocando "Barrios".
 - ibm_bruto_afip: si el texto contiene un IBM ya calculado en algún alegato o informe, ponelo. Si no, null.
-- salario_denunciado: el salario que el actor declara en su demanda (ej: "55363.60"). Sin "$".
-- fecha_nacimiento, fecha_accidente, fecha_alta, fecha_ingreso: usar formato DD/MM/AAAA.
 - Para valores no encontrados, usá null (o false / 0 / "" según el tipo).
-- NO inventes datos. NO completes campos con "[COMPLETAR]" — usá null o string vacío.
-- Respondé SOLO el JSON, sin texto previo ni posterior, sin markdown.
+- NO inventes datos. NO completes campos con "[COMPLETAR]".
+- Respondé SOLO el JSON, sin texto previo ni posterior.
 
 TEXTO DEL EXPEDIENTE:
 
@@ -208,11 +231,8 @@ export function buildAntecedentesUserPrompt(chunks, datos, config) {
   const { juez1 } = config;
   const j1 = juez1?.nombreCompleto || 'LA SEÑORA JUEZA DOCTORA ZACARÍAS';
 
-  const esEnfermedad = datos?.tipo_accion_detectado?.toUpperCase().includes('ENFERMEDAD')
-    || datos?.tipo_accion?.toUpperCase().includes('ENFERMEDAD');
-
+  const esEnfermedad = (datos?.tipo_accion_detectado || datos?.tipo_accion || '').toUpperCase().includes('ENFERMEDAD');
   const terminoHecho = esEnfermedad ? 'la enfermedad profesional' : 'el accidente de trabajo';
-  const terminoFecha = esEnfermedad ? 'fecha de primera manifestación invalidante' : 'fecha del accidente';
 
   return REGLA_DATOS +
 `TEXTO DEL EXPEDIENTE (demanda, contestación, prueba):
@@ -230,7 +250,7 @@ Usá el término "${terminoHecho}" en lugar de "accidente" donde corresponda.
 
 # TAREA
 
-Redactá ÚNICAMENTE la sección "Antecedentes:" del voto principal de la Primera Cuestión. Vas a redactar como ${j1}.
+Redactá ÚNICAMENTE la sección "Antecedentes:" del voto principal de la Primera Cuestión, como ${j1}.
 
 # REGLA SOBRE EXPEDIENTE DIGITAL
 
@@ -239,46 +259,41 @@ Este es un expediente MEV (digital). NO uses "a fs. X". Usá:
 - "Por escrito de fecha [DD/MM/AAAA], la parte demandada contesta..."
 - "En fecha [DD/MM/AAAA], el perito médico Dr. [NOMBRE] presenta su dictamen..."
 
-# CONTENIDO OBLIGATORIO (usar TODOS los datos disponibles)
+# CONTENIDO OBLIGATORIO (usar TODOS los datos del JSON y del texto)
 
-Tomá los datos del JSON extraído y del texto del expediente. Si un dato está en el JSON, INSERTALO en el texto:
-
-1. **Presentación de la demanda**: fecha de presentación electrónica + letrado actor con nombre, tomo y folio.
-2. **Datos del actor**: nombre completo, DNI, CUIL, fecha de nacimiento, domicilio, tareas que desempeñaba.
-3. **Datos del empleador**: nombre/razón social, CUIT, descripción de tareas y horario laboral.
-4. **Datos de la demandada (ART)**: nombre, CUIT, domicilio.
-5. **Relato del ${esEnfermedad ? 'cuadro' : 'siniestro'}**: ${esEnfermedad
-    ? 'fecha de primera manifestación, circunstancias, contagio/exposición laboral, sintomatología.'
+1. Presentación de la demanda: fecha + letrado actor (nombre + tomo + folio + colegio).
+2. Datos del actor: nombre completo, DNI, CUIL, fecha nacimiento, domicilio, tareas.
+3. Empleador: nombre/razón social, CUIT, descripción tareas y horario.
+4. Demandada (ART): nombre, CUIT, domicilio.
+5. Relato del ${esEnfermedad ? 'cuadro' : 'siniestro'}: ${esEnfermedad
+    ? 'fecha de primera manifestación, circunstancias, contagio/exposición laboral.'
     : 'fecha, hora, lugar, mecánica del accidente.'}
-6. **Diagnóstico inicial y prestadores médicos**, intervenciones (si hubo), fecha de alta médica.
-7. **Incapacidad reclamada** (física X%, psíquica X%) vs. % determinado por Comisión Médica, N° expediente SRT, fecha del dictamen.
-8. **Planteos de inconstitucionalidad** articulados (art. 7 ley 23.928, art. 12 LRT inc. 2, etc.).
-9. **Monto reclamado** en la demanda.
-10. **Contestación**: fecha de presentación + letrado demandada + postura (reconocimientos, negativas, excepciones).
-11. **Auto de apertura a prueba** (fecha), prueba informativa (AFIP, SRT) con fechas.
-12. **Dictamen pericial médico** (fecha, perito), impugnaciones y respuestas con fechas.
-13. **Alegatos** (fechas), pase al Acuerdo.
+6. Diagnóstico inicial y prestadores médicos, intervenciones, fecha de alta.
+7. Incapacidad reclamada (física X%, psíquica X%) vs % CM, N° expediente SRT.
+8. Planteos de inconstitucionalidad articulados.
+9. Monto reclamado.
+10. Contestación: fecha + letrado demandada + postura.
+11. Auto de apertura a prueba, prueba informativa.
+12. Dictamen pericial, impugnaciones y respuestas con fechas.
+13. Alegatos (fechas), pase al Acuerdo.
 
 # REGLA DE OMISIÓN
 
-Si verdaderamente no encontrás un dato (después de revisar el JSON extraído Y el texto del expediente), OMITÍ la oración correspondiente. NO escribas placeholders visibles como "[COMPLETAR]" o "[A COMPLETAR]".
+Si verdaderamente no encontrás un dato, OMITÍ la oración. NO escribas "[COMPLETAR]".
 
 # FORMATO
 
-Comenzá EXACTAMENTE con "Antecedentes:" — sin título adicional ni encabezado.
-No incluyas el cierre "Así lo voto", eso va en otra sección.`;
+Comenzá EXACTAMENTE con "Antecedentes:" — sin título adicional.
+No incluyas "Así lo voto" — va en otra sección.`;
 }
 
 // =============================================================================
-// 3. RESOLUCIÓN — pericia + incapacidad (sin IBM ni indemnización todavía)
+// 3. RESOLUCIÓN
 // =============================================================================
 
 export function buildResolucionUserPrompt(chunks, datos, config) {
-  const esEnfermedad = datos?.tipo_accion_detectado?.toUpperCase().includes('ENFERMEDAD')
-    || datos?.tipo_accion?.toUpperCase().includes('ENFERMEDAD');
-
+  const esEnfermedad = (datos?.tipo_accion_detectado || datos?.tipo_accion || '').toUpperCase().includes('ENFERMEDAD');
   const terminoHecho = esEnfermedad ? 'la enfermedad profesional' : 'el accidente de trabajo';
-  const terminoFechaHecho = esEnfermedad ? 'la primera manifestación invalidante' : 'el accidente';
 
   return REGLA_DATOS +
 `TEXTO DEL EXPEDIENTE - DICTAMEN PERICIAL MÉDICO:
@@ -296,52 +311,39 @@ ${JSON.stringify(datos, null, 2)}
 # TIPO DE CASO
 
 Este caso es: ${esEnfermedad ? 'ENFERMEDAD PROFESIONAL' : 'ACCIDENTE DE TRABAJO'}.
-Cuando te refieras al hecho generador, usá "${terminoHecho}".
 
 # TAREA
 
-Redactá ÚNICAMENTE la sección "Resolución:" del voto principal de la Primera Cuestión. NO incluyas cálculo de IBM ni indemnización (eso va aparte).
+Redactá ÚNICAMENTE la sección "Resolución:" del voto principal de la Primera Cuestión. NO incluyas cálculo de IBM ni indemnización.
 
-# ESTRUCTURA OBLIGATORIA
+# ESTRUCTURA
 
 ## 1. HECHOS INCUESTIONADOS (2-3 párrafos)
 - ${esEnfermedad ? 'Contingencia firme' : 'Accidente firme'} (fecha, ${esEnfermedad ? 'circunstancia de contagio/exposición' : 'mecánica breve'})
 - Prestaciones brindadas por la ART hasta el alta
-- Resultado del trámite ante Comisión Médica (% determinado, N° expediente SRT)
+- Resultado del trámite ante Comisión Médica (% y N° expediente SRT)
 - Disconformidad del actor que motiva la acción judicial
 
-## 2. PERICIA MÉDICA DETALLADA (la sección más extensa)
+## 2. PERICIA MÉDICA DETALLADA
 
-Empezá con:
-"Al efecto y a fin de discernir la cuestión controvertida, este órgano jurisdiccional cuenta con la pericia médica presentada en fecha [FECHA del JSON] por el Dr./Dra. [PERITO del JSON], quien luego de brindar los antecedentes de interés médico legal, practicó el examen médico pericial:"
+Empezá con: "Al efecto y a fin de discernir la cuestión controvertida, este órgano jurisdiccional cuenta con la pericia médica presentada en fecha [FECHA del JSON] por el Dr./Dra. [PERITO del JSON], quien luego de brindar los antecedentes de interés médico legal, practicó el examen médico pericial:"
 
-Luego, para CADA región/sistema afectado describí en detalle:
-- Diagnóstico específico
-- Grados exactos de movimiento (ej: flexión 0°-110°, extensión 0°-30°)
-- Signos clínicos (Tinel +/-, Phalen +/-, bostezo +/-, cajón +/-, Lasègue)
-- Estado muscular (hipotrofia, fuerza)
-- Material de osteosíntesis si lo hay
-- Estudios complementarios con fecha y hallazgos
-- ${esEnfermedad ? 'Para COVID/respiratorio: espirometría, saturación, capacidad vital, disnea de esfuerzo.' : ''}
+Para CADA región/sistema: diagnóstico, grados de movimiento, signos clínicos, estado muscular, material de osteosíntesis, estudios complementarios con fecha. ${esEnfermedad ? 'Para COVID/respiratorio: espirometría, saturación, capacidad vital, disnea de esfuerzo.' : ''}
 
-Si hay pericia psiquiátrica/psicológica:
-- Perito psiquiatra/psicólogo (nombre, matrícula)
-- Escalas con resultados numéricos (Beck X/63, Hamilton X/52, TEPT X/80, Rosenberg X/40)
-- Diagnóstico DSM/CIE
-- IMPORTANTE: si la perito recomienda un tratamiento futuro con expectativa de mejora, NO es permanente → restarle valor a la incapacidad psíquica.
+Si hay pericia psiquiátrica/psicológica: perito, escalas con resultados numéricos (Beck, Hamilton, TEPT, Rosenberg), diagnóstico DSM/CIE. Si la perito recomienda tratamiento futuro con expectativa de mejora, NO es permanente → restarle valor.
 
-Porcentajes: cada región con su %, factores de ponderación (dificultad para tareas, edad), TOTAL %.
+Porcentajes: cada región con su %, factores de ponderación, TOTAL %.
 
-## 3. ANÁLISIS DE IMPUGNACIONES (si las hay)
-Fundamentos de la impugnación de la demandada y respuesta del perito.
+## 3. IMPUGNACIONES (si las hay)
+Fundamentos de la demandada y respuesta del perito.
 
 ## 4. CONCLUSIÓN
 "No hallando razones que ameriten apartarme de lo dictaminado por el perito médico, considerando las objeciones de la parte demandada en fecha [FECHA] y las explicaciones del galeno, tengo por probado que [el/la actor/a] es portador/a de una incapacidad psicofísica parcial y permanente del [X]% de la T.O. por ${terminoHecho} ${esEnfermedad ? 'denunciada' : 'denunciado'} en autos (art. 57 inc. 5 ley 15.057; arts. 6 y 14.2 LRT)."
 
 # FORMATO
 
-Comenzá EXACTAMENTE con "Resolución:" — sin título adicional.
-No incluyas IBM, edad, ni cierre "Así lo voto" — eso va en la sección siguiente.`;
+Comenzá con "Resolución:" — sin título adicional.
+No incluyas IBM, edad, ni cierre "Así lo voto".`;
 }
 
 // =============================================================================
@@ -351,11 +353,6 @@ No incluyas IBM, edad, ni cierre "Así lo voto" — eso va en la sección siguie
 export function buildIbmUserPrompt(chunks, datos, config, calculos) {
   const esEnfermedad = !calculos?.esAccidente;
   const terminoFecha = esEnfermedad ? 'la fecha de primera manifestación invalidante' : 'la fecha del accidente';
-
-  // Usar SIEMPRE los valores formateados del cálculo, con fallback al config
-  const ripteActualFmt = calculos?.fmt?.ripteActual || config.ripte_actual || '[RIPTE ACTUAL]';
-  const ripteAccidenteFmt = calculos?.fmt?.ripteAccidente || config.ripte_accidente || '[RIPTE ACCIDENTE]';
-  const rfecha = config.ripte_fecha || '[FECHA]';
 
   return REGLA_DATOS +
 `TEXTO DEL EXPEDIENTE - SECCIÓN AFIP/RIPTE/IBM:
@@ -369,23 +366,7 @@ ${chunks.header.slice(0, 3000)}
 DATOS:
 
 ${JSON.stringify(datos, null, 2)}
-
-CÁLCULOS YA RESUELTOS (usalos TEXTUALMENTE — NO recalcules ni reformatees):
-
-${JSON.stringify(calculos, null, 2)}
-
-# REGLA CRÍTICA DE VALORES
-
-Los siguientes valores DEBEN aparecer EXACTAMENTE así en tu redacción:
-- RIPTE actual (${rfecha}): $ ${ripteActualFmt}
-- RIPTE al mes de la contingencia: $ ${ripteAccidenteFmt}
-- Coeficiente RIPTE: ${calculos?.coefRipte}
-- IBM bruto AFIP: ${calculos?.fmt?.ibmBruto}
-- Intereses tasa activa BNA: ${calculos?.fmt?.intereseseBNA}
-- IBM con intereses: ${calculos?.fmt?.ibmConIntereses}
-
-NO INVENTES otros valores. Si insertás un número que no está en esta lista, es un error.
-
+${bloqueValoresPrecalculados(calculos, config, datos)}
 # TAREA
 
 Redactá la sección IBM + cierre de la Primera Cuestión.
@@ -401,19 +382,20 @@ Redactá la sección IBM + cierre de la Primera Cuestión.
 Transcribí TODOS los meses con formato:
 PERÍODO: $ SALARIO_AFIP → actualizado: $ SALARIO_ACTUALIZADO
 
-Si en el texto no figuran los 12 meses con detalle, OMITÍ la tabla y pasá directo al punto 3.
+Si en el texto no figuran los 12 meses con detalle, OMITÍ la tabla y pasá directo al punto 3. NO INVENTES SALARIOS — solo transcribí los que aparecen explícitamente en el texto.
 
-## 3. VALORES CLAVE (textuales, sin alterar)
+## 3. VALORES CLAVE (usar TEXTUALMENTE los de "VALORES NUMÉRICOS A USAR")
 
-- "RIPTE al mes de la contingencia: $ ${ripteAccidenteFmt}"
-- "RIPTE actual (último publicado, ${rfecha}): $ ${ripteActualFmt}"
-- "Valor Ingreso Base Mensual (IBM) art. 12 LRT: ${calculos?.fmt?.ibmBruto || '$ [valor]'}"
-- "Intereses tasa activa BNA acumulados desde ${terminoFecha}: ${calculos?.fmt?.intereseseBNA || '$ [valor]'}"
-- "IBM con intereses: ${calculos?.fmt?.ibmConIntereses || '$ [valor]'}"
+Insertá literalmente:
+- "RIPTE al mes de la contingencia: $ [valor de la sección VALORES]"
+- "RIPTE actual (último publicado): $ [valor de la sección VALORES]"
+- "Valor Ingreso Base Mensual (IBM) art. 12 LRT: $ [IBM bruto AFIP]"
+- "Intereses tasa activa BNA acumulados desde ${terminoFecha}: $ [valor]"
+- "IBM con intereses: $ [valor]"
 
 ## 4. EDAD DEL TRABAJADOR
 
-"Teniendo en cuenta la fecha de nacimiento del/de la actor/a —[FECHA del JSON]—, y ${terminoFecha} —[FECHA del JSON]—, tengo por acreditado que contaba con [EDAD] años de edad a la fecha de ${esEnfermedad ? 'la contingencia' : 'el siniestro'}."
+"Teniendo en cuenta la fecha de nacimiento del/de la actor/a —[FECHA del JSON]—, y ${terminoFecha} —[FECHA del JSON]—, tengo por acreditado que contaba con [EDAD de VALORES] años de edad a la fecha de ${esEnfermedad ? 'la contingencia' : 'el siniestro'}."
 
 ## 5. CIERRE
 
@@ -422,7 +404,7 @@ Si en el texto no figuran los 12 meses con detalle, OMITÍ la tabla y pasá dire
 # IMPORTANTE
 
 - NO incluyas la indemnización ni la comparación RIPTE — eso va en la Segunda Cuestión.
-- NO incluyas adhesiones ni Segunda Cuestión — eso lo agregamos por fuera.
+- NO incluyas adhesiones ni Segunda Cuestión.
 - Terminá con "Así lo voto" y nada más.`;
 }
 
@@ -434,22 +416,15 @@ export function buildSegundaUserPrompt(chunks, datos, config, calculos) {
   const esEnfermedad = !calculos?.esAccidente;
   const terminoHecho = esEnfermedad ? 'la enfermedad profesional' : 'el accidente de trabajo';
   const terminoFecha = esEnfermedad ? 'la primera manifestación invalidante' : 'el accidente';
-  const fechaContingencia = datos?.accidente?.fecha || '[FECHA]';
 
-  const ripteActualFmt = calculos?.fmt?.ripteActual || config.ripte_actual || '[X]';
-  const ripteAccidenteFmt = calculos?.fmt?.ripteAccidente || config.ripte_accidente || '[X]';
-  const rfecha = config.ripte_fecha || '[FECHA]';
-
-  // Bloque condicional para +20% accidente
   const bloque20pct = calculos?.esAccidente ? `
-"Finalmente y tratándose de un accidente de trabajo corresponde adicionarle el 20% previsto por el art. 3 de la ley 26.773, alcanzando el monto total de condena la suma de ${calculos.fmt.total} (${calculos.fmt.hipotesisB} + ${calculos.fmt.adicional20})."
+"Finalmente y tratándose de un accidente de trabajo corresponde adicionarle el 20% previsto por el art. 3 de la ley 26.773, alcanzando el monto total de condena la suma de [TOTAL DE VALORES] ([HIPÓTESIS B] + [INCREMENTO 20%])."
 
-"El monto al que asciende la indemnización por incapacidad laboral derivada del accidente de trabajo sufrido en los términos de la Ley de Riesgos del Trabajo asciende a la suma de ${calculos.totalEnLetras} (${calculos.fmt.total})."` : `
-"El monto al que asciende la indemnización por incapacidad laboral derivada de la enfermedad profesional padecida, en los términos de la Ley de Riesgos del Trabajo, asciende a la suma de ${calculos?.totalEnLetras} (${calculos?.fmt?.total})."
+"El monto al que asciende la indemnización por incapacidad laboral derivada del accidente de trabajo sufrido en los términos de la Ley de Riesgos del Trabajo asciende a la suma de [TOTAL EN LETRAS] ([TOTAL EN PESOS])."` : `
+"El monto al que asciende la indemnización por incapacidad laboral derivada de la enfermedad profesional padecida, en los términos de la Ley de Riesgos del Trabajo, asciende a la suma de [TOTAL EN LETRAS] ([TOTAL EN PESOS])."
 
-(NOTA: en enfermedad profesional NO se aplica el adicional del 20% del art. 3 ley 26.773 — no menciones ese artículo en este bloque.)`;
+(NOTA: en enfermedad profesional NO se aplica el adicional del 20% del art. 3 ley 26.773 — no menciones ese artículo.)`;
 
-  // Bloque condicional para ley 24.432
   const bloque24432 = datos?.denuncia_inconst_ley_24432 ? `
 
 ## 8. INCONST. LEY 24.432 (la actora la planteó)
@@ -468,50 +443,26 @@ ${chunks.alegatos}
 DATOS:
 
 ${JSON.stringify(datos, null, 2)}
-
-CÁLCULOS YA RESUELTOS (usalos TEXTUALMENTE — NO recalcules ni reformatees):
-
-${JSON.stringify(calculos, null, 2)}
-
-# TIPO DE CASO
-
-${esEnfermedad ? 'ENFERMEDAD PROFESIONAL — NO aplica el +20% del art. 3 ley 26.773. Usá la palabra "enfermedad profesional" o "contingencia".' : 'ACCIDENTE DE TRABAJO — aplica el +20% del art. 3 ley 26.773.'}
-
-# REGLA CRÍTICA DE VALORES
-
-Los siguientes valores DEBEN aparecer EXACTAMENTE así:
-- RIPTE actual: $ ${ripteActualFmt}
-- RIPTE al mes de la contingencia: $ ${ripteAccidenteFmt}
-- Coeficiente RIPTE: ${calculos?.coefRipte}
-- IBM bruto: ${calculos?.fmt?.ibmBruto}
-- IBM con intereses: ${calculos?.fmt?.ibmConIntereses}
-- IBM con RIPTE: ${calculos?.fmt?.ibmRIPTE}
-- Indemnización hipótesis BNA: ${calculos?.fmt?.hipotesisA}
-- Indemnización hipótesis RIPTE: ${calculos?.fmt?.hipotesisB}
-- Total condena: ${calculos?.fmt?.total}
-- Total en letras: ${calculos?.totalEnLetras}
-
-NO inventes valores. Si necesitás insertar un número y no figura en esta lista, está mal.
-
+${bloqueValoresPrecalculados(calculos, config, datos)}
 # TAREA
 
-Redactá ÚNICAMENTE el contenido del voto de la SEGUNDA CUESTIÓN del magistrado que vota primero. NO incluyas el encabezado "SEGUNDA CUESTIÓN" ni "A LA SEGUNDA CUESTIÓN PLANTEADA [...] DIJO:" — eso se agrega por fuera. NO incluyas adhesiones.
+Redactá ÚNICAMENTE el contenido del voto de la SEGUNDA CUESTIÓN del magistrado que vota primero. NO incluyas el encabezado "SEGUNDA CUESTIÓN" ni "A LA SEGUNDA CUESTIÓN PLANTEADA [...] DIJO:". NO incluyas adhesiones.
 
 # ESTRUCTURA OBLIGATORIA
 
 ## 1. SÍNTESIS
 
-"De acuerdo a los hechos acreditados en la cuestión que antecede se probó que la parte actora como consecuencia de ${terminoHecho} ${esEnfermedad ? 'padecida' : 'sufrido'} presenta secuelas psicofísicas que la incapacitan en un [%] de la t.o. Asimismo quedó acreditado que su edad al momento de ${terminoFecha} era de [edad] años y que el IBM bruto AFIP asciende a la suma de ${calculos?.fmt?.ibmBruto || '$ [IBM]'}."
+"De acuerdo a los hechos acreditados en la cuestión que antecede se probó que la parte actora como consecuencia de ${terminoHecho} ${esEnfermedad ? 'padecida' : 'sufrido'} presenta secuelas psicofísicas que la incapacitan en un [% de VALORES] de la t.o. Asimismo quedó acreditado que su edad al momento de ${terminoFecha} era de [edad de VALORES] años y que el IBM bruto AFIP asciende a la suma de [IBM BRUTO de VALORES]."
 
 ## 2. CÁLCULO HIPÓTESIS (a) — TASA ACTIVA BNA
 
-"Finalmente correspondería calcular el interés equivalente al promedio de la tasa activa cartera general nominal anual vencida a treinta (30) días del Banco de la Nación Argentina previsto en el inc. 2 del art. 11 de la ley 27.348 que modifica el art. 12 LRT. Dicho interés es de ${calculos?.fmt?.intereseseBNA || '$ [intereses]'} al que sumándole el ibm de ${calculos?.fmt?.ibmBruto || '$ [ibm]'}, se arriba al ibm con intereses de ${calculos?.fmt?.ibmConIntereses || '$ [ibm+int]'}."
+"Finalmente correspondería calcular el interés equivalente al promedio de la tasa activa cartera general nominal anual vencida a treinta (30) días del Banco de la Nación Argentina previsto en el inc. 2 del art. 11 de la ley 27.348 que modifica el art. 12 LRT. Dicho interés es de [INTERESES BNA de VALORES] al que sumándole el ibm de [IBM BRUTO de VALORES], se arriba al ibm con intereses de [IBM CON INTERESES de VALORES]."
 
-"La fórmula entonces determina una indemnización de ${calculos?.fmt?.hipotesisA || '$ [hipotesis A]'} (53 × ${calculos?.fmt?.ibmConIntereses || ''} × 65 / [edad] × [%])."
+"La fórmula entonces determina una indemnización de [HIPÓTESIS A de VALORES] (53 × [IBM CON INTERESES] × 65 / [edad] × [%])."
 
 ## 3. RAZONAMIENTO CONSTITUCIONAL
 
-Desarrollá 8-10 párrafos extensos en este orden:
+8-10 párrafos extensos en este orden:
 
 a) "Ahora bien, y en atención al pedido formulado por la parte actora en su escrito de demanda, se impone realizar un análisis económico de la cuestión a debate."
 
@@ -525,17 +476,19 @@ e) Cita textual de "Barrios" SCBA: "el alza generalizada de los precios y la dep
 
 f) "Asimismo la jurisprudencia constante de la SCBA ('Monchiero' L. 120.521, 'Amaya' L. 120.348, entre otros) y de la CSJN ('Aquino', 'Milone', 'Ascua', 'Vizzoti') ha enfatizado que el trabajador es sujeto de preferente tutela constitucional y que los créditos laborales —en el caso que nos atañe, las prestaciones derivadas de ${terminoHecho}— deben garantizar una reparación suficiente, razonable y proporcional."
 
-g) "Que, a la luz de tales premisas, el inciso 2 del art. 12 LRT —en cuanto impide que el IBM refleje las variaciones salariales reales ocurridas hasta el efectivo pago— resulta incompatible con los arts. 14 bis y 17 de la Constitución Nacional, en tanto propicia un menoscabo sustancial del crédito de naturaleza alimentaria."
+g) "Que, a la luz de tales premisas, el inciso 2 del art. 12 LRT —en cuanto impide que el IBM refleje las variaciones salariales reales ocurridas hasta el efectivo pago— resulta incompatible con los arts. 14 bis y 17 de la Constitución Nacional."
 
-## 4. COMPARATIVA NUMÉRICA EXPLÍCITA (los valores van TEXTUALES de "calculos")
+## 4. COMPARATIVA NUMÉRICA EXPLÍCITA
 
-"Adviértase que la fórmula indemnizatoria utilizando la tasa de interés devengada entre ${terminoFecha} (${fechaContingencia}) hasta la actualidad calculada según el promedio de la tasa activa cartera general del Banco de la Nación Argentina arroja un ibm de ${calculos?.fmt?.ibmConIntereses || '$ [X]'} y una indemnización de ${calculos?.fmt?.hipotesisA || '$ [X]'}; mientras que si se aplicara en igual período el índice 'ripte', el ibm se elevaría a ${calculos?.fmt?.ibmRIPTE || '$ [Y]'} y la indemnización alcanzaría el importe de ${calculos?.fmt?.hipotesisB || '$ [Y]'} (según el siguiente detalle: último ripte publicado ${rfecha}: $ ${ripteActualFmt} / ripte ${esEnfermedad ? 'mes manifestación' : 'mes accidente'}: $ ${ripteAccidenteFmt} = coef. ${calculos?.coefRipte || '[X]'}. ibm de ${calculos?.fmt?.ibmBruto || '$ [X]'} × coef ${calculos?.coefRipte || '[X]'} = ${calculos?.fmt?.ibmRIPTE || '$ [Y]'}; 53 × ${calculos?.fmt?.ibmRIPTE || ''} × 65 / [edad] × [%])."
+Usá EXACTAMENTE los valores de la sección VALORES NUMÉRICOS A USAR:
+
+"Adviértase que la fórmula indemnizatoria utilizando la tasa de interés devengada entre ${terminoFecha} ([fecha contingencia]) hasta la actualidad calculada según el promedio de la tasa activa cartera general del Banco de la Nación Argentina arroja un ibm de [IBM CON INTERESES] y una indemnización de [HIPÓTESIS A]; mientras que si se aplicara en igual período el índice 'ripte', el ibm se elevaría a [IBM CON RIPTE] y la indemnización alcanzaría el importe de [HIPÓTESIS B] (según el siguiente detalle: último ripte publicado: $ [RIPTE ACTUAL] / ripte ${esEnfermedad ? 'mes manifestación' : 'mes accidente'}: $ [RIPTE ACCIDENTE] = coef. [COEF]. ibm de [IBM BRUTO] × coef [COEF] = [IBM CON RIPTE]; 53 × [IBM CON RIPTE] × 65 / [edad] × [%])."
 
 ## 5. DECLARACIÓN DE INCONSTITUCIONALIDAD Y CONDENA
 
 "Que, en consecuencia, corresponde declarar la inconstitucionalidad del inc. 2 del art. 12 LRT en este caso y disponer que el ingreso base mensual se actualice conforme al índice RIPTE hasta la fecha de pago, asegurando así la integridad del crédito y el respeto del espíritu protector que informa nuestro ordenamiento y que, en última instancia, coloca al trabajador en el centro de la escena como sujeto de preferente tutela constitucional (art. 14 bis CN)."
 
-"Por ello y teniendo en cuenta los hechos probados, de acuerdo con lo previsto por los arts. 6 y 14.2 de la ley 24.557, corresponde —teniendo en cuenta la edad del/de la actor/a a ${terminoFecha} ([edad] años), la minusvalía de su capacidad laborativa ([%]) y el IBM con RIPTE ${calculos?.fmt?.ibmRIPTE || '$ [X]'}— una indemnización que asciende a la suma de ${calculos?.fmt?.hipotesisB || '$ [Y]'} (53 × ${calculos?.fmt?.ibmRIPTE || ''} × 65 / [edad] × [%]) (arts. 6 y 14.2 ley 24.557, art. 12 ley 27.348)."
+"Por ello y teniendo en cuenta los hechos probados, de acuerdo con lo previsto por los arts. 6 y 14.2 de la ley 24.557, corresponde —teniendo en cuenta la edad del/de la actor/a a ${terminoFecha} ([edad] años), la minusvalía de su capacidad laborativa ([%]) y el IBM con RIPTE [IBM CON RIPTE]— una indemnización que asciende a la suma de [HIPÓTESIS B] (53 × [IBM CON RIPTE] × 65 / [edad] × [%]) (arts. 6 y 14.2 ley 24.557, art. 12 ley 27.348)."
 
 ${bloque20pct}
 
@@ -545,7 +498,7 @@ ${bloque20pct}
 
 ## 7. COSTAS
 
-"Costas: Imponer las costas del presente juicio a cargo de la demandada [DEMANDADA] en su condición de vencida (art. 24 ley 15.057)."
+"Costas: Imponer las costas del presente juicio a cargo de la demandada [DEMANDADA del JSON] en su condición de vencida (art. 24 ley 15.057)."
 ${bloque24432}
 
 ## ${datos?.denuncia_inconst_ley_24432 ? '9' : '8'}. PLANTEOS RESTANTES (ABSTRACTO)
@@ -558,8 +511,8 @@ ${bloque24432}
 
 # IMPORTANTE
 
-- NO incluyas las adhesiones del 2° magistrado ni de Weiss — esas se agregan por fuera.
-- ${esEnfermedad ? 'CASO DE ENFERMEDAD PROFESIONAL: NO menciones ni apliques el +20% del art. 3 ley 26.773. NO uses la palabra "accidente" — usá "enfermedad profesional" o "contingencia".' : 'CASO DE ACCIDENTE: SÍ aplicá el +20% del art. 3 ley 26.773.'}`;
+- NO incluyas las adhesiones del 2° magistrado ni de Weiss.
+- ${esEnfermedad ? 'ENFERMEDAD PROFESIONAL: NO menciones ni apliques el +20% del art. 3 ley 26.773.' : 'ACCIDENTE: SÍ aplicá el +20% del art. 3 ley 26.773.'}`;
 }
 
 // =============================================================================
@@ -577,10 +530,6 @@ export function buildSentenciaUserPrompt(chunks, datos, config, calculos) {
 
   const haceLugar = !!calculos;
   const esEnfermedad = !calculos?.esAccidente;
-  const montoCondenaLetras = calculos?.totalEnLetras || '[A COMPLETAR EN LETRAS]';
-  const montoCondenaNum = calculos?.fmt?.total || '[A COMPLETAR]';
-
-  // Artículos citables en el inciso 2°: si es enfermedad profesional, no art. 3 ley 26.773
   const artsCondena = `arts. 6.1, 8.1 y 14.2.a ley 24.557, art. 12 ley 27.348${calculos?.esAccidente ? ', art. 3 ley 26.773' : ''}`;
 
   return REGLA_DATOS +
@@ -595,20 +544,16 @@ ${chunks.final}
 DATOS:
 
 ${JSON.stringify(datos, null, 2)}
-
-CÁLCULOS:
-
-${JSON.stringify(calculos, null, 2)}
-
+${bloqueValoresPrecalculados(calculos, config, datos)}
 # TIPO DE CASO
 
 ${esEnfermedad
-  ? 'ENFERMEDAD PROFESIONAL — en el inciso 2° NO cites el art. 3 ley 26.773 ni hables de "accidente de trabajo". Usá "enfermedad profesional" o "contingencia".'
+  ? 'ENFERMEDAD PROFESIONAL — en el inciso 2° NO cites el art. 3 ley 26.773 ni hables de "accidente de trabajo".'
   : 'ACCIDENTE DE TRABAJO — citá el art. 3 ley 26.773 en el inciso 2° y usá "accidente de trabajo".'}
 
 # TAREA
 
-Redactá la SENTENCIA DISPOSITIVO completa. NO incluyas el "S E N T E N C I A" ni el "AUTOS Y VISTO: CONSIDERANDO:" inicial — eso se agrega por fuera. Empezá directamente con los incisos del RESUELVE.
+Redactá la SENTENCIA DISPOSITIVO completa. NO incluyas el "S E N T E N C I A" ni el "AUTOS Y VISTO: CONSIDERANDO:" inicial. Empezá directamente con los incisos del RESUELVE.
 
 # INCISOS EN ORDEN EXACTO
 
@@ -621,7 +566,7 @@ ${haceLugar
 ## 2°) CONDENA PRINCIPAL
 
 ${haceLugar
-  ? `"Hacer lugar a la demanda incoada por [NOMBRE ACTOR del JSON] cuyo pago de ${montoCondenaLetras} (${montoCondenaNum}) deberá afrontar [DEMANDADA del JSON] en el plazo de diez (10) días de quedar firme el presente pronunciamiento, conforme todo el detalle realizado por el reclamo de autos (${artsCondena}; art. 345 CPCC y 89 ley 15.057). Por las secuelas psicofísicas que padece, que lo/la incapacitan en el [%] de la t.o."`
+  ? `"Hacer lugar a la demanda incoada por [NOMBRE ACTOR del JSON] cuyo pago de [TOTAL EN LETRAS] ([TOTAL EN PESOS]) deberá afrontar [DEMANDADA del JSON] en el plazo de diez (10) días de quedar firme el presente pronunciamiento, conforme todo el detalle realizado por el reclamo de autos (${artsCondena}; art. 345 CPCC y 89 ley 15.057). Por las secuelas psicofísicas que padece, que lo/la incapacitan en el [%] de la t.o."`
   : `"Rechazar en un todo la demanda por reclamo indemnizatorio leyes 24.557${calculos?.esAccidente !== false ? ' y 26.773' : ''}, con sustento en ${esEnfermedad ? 'la enfermedad profesional' : 'el accidente'} que integra estas actuaciones, padecido por [NOMBRE ACTOR del JSON], contra [DEMANDADA del JSON] (art. 726 CCC)."`}
 
 ${haceLugar ? `
@@ -699,21 +644,18 @@ b) reclamar los honorarios regulados convertidos al momento de la mora en moneda
 
 # IMPORTANTE
 
-- Numerá los incisos como aparecen arriba (1°, 2°, 3°, etc.).
-- Incluí los bloques marcados como "TEXTO ÍNTEGRO" literalmente, sin acortar.
-- Si rechaza la demanda: omití CBU, intereses por mora, instrucciones de pago de honorarios.
-- ${esEnfermedad ? 'CASO ENFERMEDAD PROFESIONAL: NO cites art. 3 ley 26.773 en el inciso 2°.' : 'CASO ACCIDENTE: SÍ citá art. 3 ley 26.773 en el inciso 2°.'}`;
+- Numerá los incisos como aparecen arriba.
+- Incluí los bloques "TEXTO ÍNTEGRO" literalmente.
+- Si rechaza la demanda: omití CBU, intereses por mora, instrucciones de pago.
+- ${esEnfermedad ? 'ENFERMEDAD: NO cites art. 3 ley 26.773 en el inciso 2°.' : 'ACCIDENTE: SÍ citá art. 3 ley 26.773.'}`;
 }
 
 // =============================================================================
-// ADHESIONES (texto fijo, NO requieren LLM)
+// ADHESIONES (texto fijo)
 // =============================================================================
 
 const WEISS_NOMBRE_COMPLETO = 'LA SEÑORA JUEZA DOCTORA MARÍA ALEJANDRA WEISS';
 
-/**
- * Construye las adhesiones de la PRIMERA CUESTIÓN.
- */
 export function buildAdhesionPrimera(config) {
   const { juez2 } = config;
   const j2art = juez2.genero === 'm' ? 'el Señor Juez Doctor' : 'la Señora Jueza Doctora';
@@ -725,12 +667,6 @@ export function buildAdhesionPrimera(config) {
   return `${adhJ2}\n\n${adhWeiss}`;
 }
 
-/**
- * Construye las adhesiones de la SEGUNDA CUESTIÓN.
- * Variante 1: actor planteó inconst. art. 7 ley 23.928 → Weiss con salvedad larga.
- * Variante 2: actor no la planteó → Weiss con salvedad NIEVA.
- * Variante 3: rechazo → Weiss adhiere sin salvedad.
- */
 export function buildAdhesionSegunda(config, calculos, datos) {
   const { juez2 } = config;
   const j2art = juez2.genero === 'm' ? 'el Señor Juez Doctor' : 'la Señora Jueza Doctora';
@@ -741,13 +677,10 @@ export function buildAdhesionSegunda(config, calculos, datos) {
 
   let adhWeiss;
   if (!calculos) {
-    // Variante 3: rechazo
     adhWeiss = `A la misma cuestión planteada, ${WEISS_NOMBRE_COMPLETO}, adhiere a las consideraciones formuladas por ${primerCorto} y vota en igual sentido.`;
   } else if (datos?.denuncia_inconst_ley_23928) {
-    // Variante 1: actor planteó inconst. art. 7 ley 23.928
     adhWeiss = `A LA SEGUNDA CUESTIÓN PLANTEADA ${WEISS_NOMBRE_COMPLETO}, DIJO: Sin perjuicio de compartir la solución adoptada en cuanto a la procedencia de la actualización del ingreso base mensual conforme al índice RIPTE, discrepo con el fundamento en que se sustenta. Mientras el voto mayoritario —siguiendo el criterio del Tribunal del Trabajo N.º 5— basa su decisión en la declaración de inconstitucionalidad del inciso 2 del artículo 12 de la Ley de Riesgos del Trabajo, considero, conforme a la postura que mantengo en el Tribunal del Trabajo N.º 4 que integro, que tanto la procedencia de la actualización como la invalidez de la norma citada derivan de la inconstitucionalidad sobreviniente del artículo 7 de la ley 23.928, conforme lo dispuesto por la ley 25.561, cuya tacha fue oportunamente articulada por la parte actora.\n\nAsí lo voto.`;
   } else {
-    // Variante 2: actor NO planteó inconst. art. 7 ley 23.928
     adhWeiss = `A LA SEGUNDA CUESTIÓN PLANTEADA ${WEISS_NOMBRE_COMPLETO} DIJO: Habiendo en el presente quedado conformada la mayoría con los votos de los doctores ${config.juez1.nombre} y ${config.juez2.nombre}, adhiero al voto emitido en primer término, dejando a salvo que conforme criterio del Tribunal de Trabajo N° 4 departamental que integro, conforme Exp. N° 20.463 causa "NIEVA", sent. del 13/8/2025; no habiendo solicitado el actor método de actualización específico, debió aplicarse al valor del ingreso medio la tasa activa cartera general nominal anual vencida a treinta días que fija el Banco de la Nación Argentina.\n\nAsí lo voto.`;
   }
 
@@ -756,9 +689,6 @@ export function buildAdhesionSegunda(config, calculos, datos) {
   return `${adhJ2}\n\n${adhWeiss}\n\n${cierreAcuerdo}`;
 }
 
-/**
- * Determina cuál variante del voto de Weiss aplica.
- */
 export function detectarVarianteWeiss(calculos, datos) {
   if (!calculos) return 3;
   if (datos?.denuncia_inconst_ley_23928) return 1;
