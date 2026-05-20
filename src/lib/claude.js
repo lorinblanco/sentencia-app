@@ -1,16 +1,16 @@
 // src/lib/claude.js
 // =============================================================================
-// SentencIA - Claude API client v8 (post-Muzychuk SCBA + Planilla CALM)
+// SentencIA - Claude API client v9 (streaming SSE)
 // =============================================================================
-// Cambios v7 → v8:
-//   - Integración con parseCalculador.js: si el usuario sube la planilla del
-//     CALM como archivo extra, se parsea directamente (sin LLM) y se usan
-//     esos valores como fuente de verdad para todos los cálculos.
-//   - Nueva función detectarEsEnfermedad() que combina extract LLM + keywords
-//     en chunks.header para detectar enfermedad profesional aunque el LLM
-//     falle (caso JARA).
-//   - buildCalculos() ahora acepta un tercer parámetro opcional `calmParsed`
-//     y delega en adaptToCalculos() cuando está disponible.
+// Cambios v8 → v9:
+//   - callClaude() ahora acepta un callback opcional `onChunk`. Si se pasa,
+//     hace streaming SSE: pide stream:true al proxy, parsea eventos
+//     content_block_delta y va llamando al callback con cada pedazo de texto.
+//   - generateSection() expone onChunk para que la UI pueda mostrar tokens
+//     en tiempo real.
+//   - extractBasicInfo() sigue NO usando streaming (necesita el JSON completo).
+//   - Bajamos max_tokens de segunda/sentencia de 6000 a 4800 (margen de
+//     seguridad sobre el timeout, aunque streaming ya lo neutraliza).
 // =============================================================================
 
 import {
@@ -158,21 +158,11 @@ export function buildChunks(fullText, extraTexts = []) {
 // PLANILLA CALM — detección y parsing
 // =============================================================================
 
-/**
- * Intenta detectar y parsear un archivo como planilla del CALM.
- * Devuelve el resultado del parser, o null si el archivo no es una planilla CALM.
- *
- * @param {File} file
- * @returns {Promise<object|null>}
- */
 export async function tryParsePlanillaCALM(file) {
   const ext = file.name.split('.').pop().toLowerCase()
   if (ext !== 'xlsx' && ext !== 'xlsm') return null
-
   try {
-    const parsed = await parseCalculadorCALM(file)
-    // Si esPlanillaCALM falla, parseCalculadorCALM throwea — acá ya validamos
-    return parsed
+    return await parseCalculadorCALM(file)
   } catch (e) {
     console.log('[CALM] Archivo Excel no es planilla del CALM:', e.message)
     return null
@@ -183,19 +173,7 @@ export async function tryParsePlanillaCALM(file) {
 // DETECCIÓN DUAL: ¿es enfermedad profesional?
 // =============================================================================
 
-/**
- * Detecta si el caso es enfermedad profesional combinando:
- *   1) Lo que extrajo el LLM en `tipo_accion_detectado`
- *   2) Keywords específicas en el chunk header del expediente
- *
- * Default: accidente (false).
- *
- * @param {object} chunks  Resultado de buildChunks()
- * @param {object} datos   JSON del extract LLM
- * @returns {boolean} true si es enfermedad profesional
- */
 export function detectarEsEnfermedad(chunks, datos) {
-  // Fuente 1: extract LLM
   const tipoLLM = (
     datos?.tipo_accion_detectado || datos?.tipo_accion || ''
   ).toUpperCase()
@@ -203,33 +181,41 @@ export function detectarEsEnfermedad(chunks, datos) {
   if (tipoLLM.includes('ENFERMEDAD')) return true
   if (tipoLLM.includes('ACCIDENTE')) return false
 
-  // Fuente 2: keywords en el chunk header (fallback robusto)
   const headerLower = (chunks?.header || '').toLowerCase()
   const indicadoresEnfermedad = [
     's/ enfermedad profesional',
     'materia: inicio demanda laboral por enfermedad profesional',
-    'enfermedad profesional - acción especial',
-    'enfermedad profesional - accion especial',
-    'inicio demanda laboral por enfermedad profesional',
-    'enfermedad profesional ley',
+    'enfermedad profesional',
     'covid-19',
     'covid 19',
-    'enfermedad-accidente',
     'dnu 367/2020',
+    'dnu 367/20',
+    'decreto 367/2020',
+    'presunción de enfermedad profesional',
   ]
-  for (const indicador of indicadoresEnfermedad) {
-    if (headerLower.includes(indicador)) return true
-  }
+  if (indicadoresEnfermedad.some(kw => headerLower.includes(kw))) return true
 
-  // Default: accidente
   return false
 }
 
 // =============================================================================
-// CALL CLAUDE (sin cambios)
+// CALL CLAUDE — con soporte de streaming SSE
 // =============================================================================
 
-async function callClaude(apiKey, userPrompt, maxTokens = 4000) {
+/**
+ * Llama al proxy /api/generate.
+ *
+ * @param {string} apiKey
+ * @param {string} userPrompt
+ * @param {number} maxTokens
+ * @param {(piece:string, soFar:string) => void} [onChunk]
+ *   Si se pasa, activa streaming. Se invoca con cada pedazo de texto y el
+ *   acumulado hasta el momento. Si no se pasa, espera la respuesta completa.
+ * @returns {Promise<string>} texto completo
+ */
+async function callClaude(apiKey, userPrompt, maxTokens = 4000, onChunk = null) {
+  const useStream = typeof onChunk === 'function'
+
   const res = await fetch('/api/generate', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Api-Key': apiKey },
@@ -237,16 +223,84 @@ async function callClaude(apiKey, userPrompt, maxTokens = 4000) {
       system: SYSTEM_PROMPT,
       messages: [{ role: 'user', content: userPrompt }],
       max_tokens: maxTokens,
+      stream: useStream,
     }),
   })
-  const txt = await res.text()
-  let data
-  try { data = JSON.parse(txt) }
-  catch { throw new Error(`Respuesta inválida (${res.status}): ${txt.slice(0, 200)}`) }
-  if (!res.ok) throw new Error(data.error?.message || data.error || `Error HTTP ${res.status}`)
-  if (data.error) throw new Error(data.error.message || JSON.stringify(data.error))
-  if (!data.content?.[0]?.text) throw new Error('Respuesta vacía de la API')
-  return data.content[0].text
+
+  // ===== MODO NO-STREAMING =====
+  if (!useStream) {
+    const txt = await res.text()
+    let data
+    try { data = JSON.parse(txt) }
+    catch { throw new Error(`Respuesta inválida (${res.status}): ${txt.slice(0, 200)}`) }
+    if (!res.ok) throw new Error(data.error?.message || data.error || `Error HTTP ${res.status}`)
+    if (data.error) throw new Error(data.error.message || JSON.stringify(data.error))
+    if (!data.content?.[0]?.text) throw new Error('Respuesta vacía de la API')
+    return data.content[0].text
+  }
+
+  // ===== MODO STREAMING =====
+  // El proxy puede devolver JSON de error si Anthropic rechaza el request
+  // antes de empezar a streamear. Detectamos por Content-Type.
+  const contentType = res.headers.get('content-type') || ''
+  if (!res.ok || contentType.includes('application/json')) {
+    const txt = await res.text()
+    let data = null
+    try { data = JSON.parse(txt) } catch {}
+    throw new Error(
+      data?.error?.message || data?.error || `Error HTTP ${res.status}: ${txt.slice(0, 200)}`
+    )
+  }
+
+  if (!res.body) throw new Error('Streaming no soportado por el navegador')
+
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let fullText = ''
+  let streamError = null
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+
+    // SSE: eventos separados por línea en blanco (\n\n)
+    const events = buffer.split('\n\n')
+    buffer = events.pop() // último puede estar incompleto, lo guardamos
+
+    for (const ev of events) {
+      if (!ev.trim()) continue
+      let eventName = ''
+      let dataLine = ''
+      for (const line of ev.split('\n')) {
+        if (line.startsWith('event:')) eventName = line.slice(6).trim()
+        else if (line.startsWith('data:')) dataLine = line.slice(5).trim()
+      }
+      if (!dataLine || dataLine === '[DONE]') continue
+
+      let obj
+      try { obj = JSON.parse(dataLine) }
+      catch { continue }
+
+      // Anthropic envía estos eventos:
+      //   message_start, content_block_start, content_block_delta,
+      //   content_block_stop, message_delta, message_stop, error
+      if (obj.type === 'content_block_delta' && obj.delta?.type === 'text_delta') {
+        const piece = obj.delta.text || ''
+        if (piece) {
+          fullText += piece
+          onChunk(piece, fullText)
+        }
+      } else if (obj.type === 'error' || eventName === 'error') {
+        streamError = obj.error?.message || obj.message || 'Stream error'
+      }
+    }
+  }
+
+  if (streamError) throw new Error(streamError)
+  if (!fullText) throw new Error('Stream vacío de la API')
+  return fullText
 }
 
 // =============================================================================
@@ -267,26 +321,8 @@ function calcIndemnizacion(ibm, edad, porcentaje) {
   return 53 * ibm * 65 / edad * (porcentaje / 100)
 }
 
-/**
- * Construye el objeto "calculos" que se pasa a los prompts.
- *
- * Si recibe `calmParsed` con esValida=true, delega en adaptToCalculos()
- * (los números vienen 100% de la planilla del CALM, sin recalcular).
- *
- * En caso contrario, hace el cálculo manual original (multiplicación con
- * coeficiente único — el método legacy).
- *
- * Devuelve null si faltan datos críticos (caso RECHAZO).
- *
- * @param {object} config        Config del wizard (form de Paso 2)
- * @param {object} datos         JSON del extract LLM
- * @param {object} [calmParsed]  Resultado de parseCalculadorCALM (opcional)
- * @param {boolean} [esEnfermedad] Si se conoce el tipo, pasarlo
- */
 export function buildCalculos(config, datos, calmParsed = null, esEnfermedad = null) {
-  // === CASO PREFERIDO: hay planilla CALM válida ===
   if (calmParsed && calmParsed.esValida) {
-    // Si no nos pasaron explícitamente el tipo, lo detectamos desde datos
     const esEnf = esEnfermedad != null
       ? esEnfermedad
       : (datos?.tipo_accion_detectado || datos?.tipo_accion || '').toUpperCase().includes('ENFERMEDAD')
@@ -294,7 +330,6 @@ export function buildCalculos(config, datos, calmParsed = null, esEnfermedad = n
     return adaptToCalculos(calmParsed, !esEnf)
   }
 
-  // === CASO LEGACY: cálculo manual desde el config ===
   const ripteActual = parseMonto(config.ripte_actual)
   const ripteAccidente = parseMonto(config.ripte_accidente)
   const intereseseBNA = parseMonto(config.intereses_bna)
@@ -313,7 +348,6 @@ export function buildCalculos(config, datos, calmParsed = null, esEnfermedad = n
   const ibmRIPTE = ibmBruto * coefRipte
   const hipotesisB = calcIndemnizacion(ibmRIPTE, edad, porcentaje)
 
-  // Usar esEnfermedad explícito si vino; si no, inferir de datos
   const esEnf = esEnfermedad != null
     ? esEnfermedad
     : (datos?.tipo_accion_detectado || datos?.tipo_accion || 'ACCIDENTE').toUpperCase().includes('ENFERMEDAD')
@@ -355,12 +389,12 @@ export function buildCalculos(config, datos, calmParsed = null, esEnfermedad = n
 }
 
 // =============================================================================
-// EXTRACT (sin cambios estructurales — solo se mantiene el log para debug)
+// EXTRACT (no usa streaming — necesitamos el JSON completo de una vez)
 // =============================================================================
 
 export async function extractBasicInfo(apiKey, chunks) {
   const prompt = buildExtractUserPrompt(chunks)
-  const text = await callClaude(apiKey, prompt, 2500)
+  const text = await callClaude(apiKey, prompt, 2500) // sin onChunk → no-streaming
   try {
     const clean = text.replace(/```json|```/g, '').trim()
     const json = JSON.parse(clean)
@@ -373,10 +407,15 @@ export async function extractBasicInfo(apiKey, chunks) {
 }
 
 // =============================================================================
-// GENERATE SECTION (sin cambios)
+// GENERATE SECTION — usa streaming si se pasa onChunk
 // =============================================================================
 
-export async function generateSection(apiKey, sectionType, chunks, data, config, calculos = null) {
+/**
+ * @param {Function} [onChunk]  callback (piece, soFar) para streaming
+ */
+export async function generateSection(
+  apiKey, sectionType, chunks, data, config, calculos = null, onChunk = null
+) {
   let userPrompt
   switch (sectionType) {
     case 'antecedentes': userPrompt = buildAntecedentesUserPrompt(chunks, data, config); break
@@ -386,8 +425,9 @@ export async function generateSection(apiKey, sectionType, chunks, data, config,
     case 'sentencia':    userPrompt = buildSentenciaUserPrompt(chunks, data, config, calculos); break
     default: throw new Error(`Sección desconocida: ${sectionType}`)
   }
+  // 4800 para las pesadas (sigue siendo ~3500 palabras), 4000 para el resto
   const maxTokens = sectionType === 'segunda' || sectionType === 'sentencia' ? 4800 : 4000
-  return await callClaude(apiKey, userPrompt, maxTokens)
+  return await callClaude(apiKey, userPrompt, maxTokens, onChunk)
 }
 
 // Re-exports para conveniencia
@@ -395,11 +435,7 @@ export { detectarVarianteWeiss } from './sentenciaPrompts'
 export { parseCalculadorCALM, adaptToCalculos, esPlanillaCALM } from './parseCalculador'
 
 // =============================================================================
-// LECTURA DE ARCHIVOS EXTRA
-// =============================================================================
-// IMPORTANTE: si el archivo es una planilla CALM, NO se debe procesar acá
-// (el chunk afip no la necesita como texto plano). La detección se hace en
-// NewSentence.jsx via tryParsePlanillaCALM() antes de invocar esta función.
+// LECTURA DE ARCHIVOS EXTRA (sin cambios)
 // =============================================================================
 
 export async function extractExtraFileText(file) {
