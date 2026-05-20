@@ -386,7 +386,7 @@ export async function generateSection(apiKey, sectionType, chunks, data, config,
     case 'sentencia':    userPrompt = buildSentenciaUserPrompt(chunks, data, config, calculos); break
     default: throw new Error(`Sección desconocida: ${sectionType}`)
   }
-  const maxTokens = sectionType === 'segunda' || sectionType === 'sentencia' ? 6000 : 4500
+  const maxTokens = sectionType === 'segunda' || sectionType === 'sentencia' ? 4800 : 4000
   return await callClaude(apiKey, userPrompt, maxTokens)
 }
 
