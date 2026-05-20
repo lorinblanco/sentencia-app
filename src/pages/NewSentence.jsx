@@ -422,36 +422,48 @@ export default function NewSentence({ profile, session }) {
       fullSentence += `A LA PRIMERA CUESTIÓN PLANTEADA ${voto.juez1.nombreCompleto} DIJO:\n\n`
       setSentenceText(fullSentence)
 
-      setGenStep(4); setGenProgress(45)
-      const antecedentes = await generateSection(apiKey, 'antecedentes', chunks, data, config, calculos)
-      fullSentence += antecedentes + '\n\n'
-      setSentenceText(fullSentence)
+      // Helper: callback de streaming que actualiza la vista previa en vivo.
+// Cierra sobre fullSentence; cada pedazo se concatena al texto acumulado.
+const streamUpdate = (piece, soFar) => {
+  setSentenceText(fullSentence + soFar)
+}
 
-      setGenStep(5); setGenProgress(60)
-      const resolucion = await generateSection(apiKey, 'resolucion', chunks, data, config, calculos)
-      fullSentence += resolucion + '\n\n'
-      setSentenceText(fullSentence)
+setGenStep(4); setGenProgress(45)
+const antecedentes = await generateSection(
+  apiKey, 'antecedentes', chunks, data, config, calculos, streamUpdate
+)
+fullSentence += antecedentes + '\n\n'
+setSentenceText(fullSentence)
 
-      setGenStep(6); setGenProgress(72)
-      const ibm = await generateSection(apiKey, 'ibm', chunks, data, config, calculos)
-      fullSentence += ibm + '\n\n'
-      fullSentence += buildAdhesionPrimera(config) + '\n\n'
-      fullSentence += `SEGUNDA CUESTIÓN: ¿Qué pronunciamiento corresponde dictar?\n\n`
-      fullSentence += `A LA SEGUNDA CUESTIÓN PLANTEADA ${voto.juez1.nombreCompleto} DIJO:\n\n`
-      setSentenceText(fullSentence)
+setGenStep(5); setGenProgress(60)
+const resolucion = await generateSection(
+  apiKey, 'resolucion', chunks, data, config, calculos, streamUpdate
+)
+fullSentence += resolucion + '\n\n'
+setSentenceText(fullSentence)
 
-      setGenStep(7); setGenProgress(85)
-      const segunda = await generateSection(apiKey, 'segunda', chunks, data, config, calculos)
-      fullSentence += segunda + '\n\n'
-      fullSentence += buildAdhesionSegunda(config, calculos, data) + '\n\n'
-      setSentenceText(fullSentence)
+setGenStep(6); setGenProgress(72)
+const ibm = await generateSection(
+  apiKey, 'ibm', chunks, data, config, calculos, streamUpdate
+)
+fullSentence += ibm + '\n\n'
+fullSentence += buildAdhesionPrimera(config) + '\n\n'
+fullSentence += `SEGUNDA CUESTIÓN: ¿Qué pronunciamiento corresponde dictar?\n\n`
+fullSentence += `A LA SEGUNDA CUESTIÓN PLANTEADA ${voto.juez1.nombreCompleto} DIJO:\n\n`
+setSentenceText(fullSentence)
 
-      setGenStep(8); setGenProgress(93)
-      const dispositivo = await generateSection(apiKey, 'sentencia', chunks, data, config, calculos)
-      fullSentence += `S  E  N  T  E  N  C  I  A\n\n`
-      fullSentence += `AUTOS Y VISTO: CONSIDERANDO lo decidido en el Acuerdo que antecede y los fundamentos allí vertidos, el Tribunal del Trabajo N° 5 de Quilmes, por mayoría,\n\nRESUELVE:\n\n`
-      fullSentence += dispositivo
-      setSentenceText(fullSentence)
+setGenStep(7); setGenProgress(85)
+const segunda = await generateSection(
+  apiKey, 'segunda', chunks, data, config, calculos, streamUpdate
+)
+fullSentence += segunda + '\n\n'
+fullSentence += buildAdhesionSegunda(config, calculos, data) + '\n\n'
+setSentenceText(fullSentence)
+
+setGenStep(8); setGenProgress(93)
+const dispositivo = await generateSection(
+  apiKey, 'sentencia', chunks, data, config, calculos, streamUpdate
+)
 
       setGenStep(9); setGenProgress(98)
       const meta = {
