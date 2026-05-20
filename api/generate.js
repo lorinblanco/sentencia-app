@@ -1,72 +1,120 @@
 // api/generate.js
 // =============================================================================
-// SENTENCIA - Proxy genérico para la API de Anthropic
-// Versión 2.2.1 - Mayo 2026
-//
-// Runtime: Node.js serverless. maxDuration declarado INLINE (no depende de
-// vercel.json) — Vercel a veces ignora el vercel.json en deploys parciales.
+// PROXY GENÉRICO A ANTHROPIC — v3.0 con streaming
+// =============================================================================
+// Cambios v2.2.1 → v3.0:
+//   - Soporta streaming SSE. Si el body trae `stream: true`, se pipea
+//     directamente la respuesta de Anthropic al cliente sin esperar a que
+//     termine. Esto resuelve el timeout de Vercel (60s) para secciones largas
+//     (segunda, sentencia) sin necesidad de subir el maxDuration.
+//   - Mantiene el modo no-streaming para extract (necesita JSON completo).
 // =============================================================================
 
-export const config = {
-  maxDuration: 60,
-}
+export const config = { maxDuration: 60 }
+
+const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages'
+const ANTHROPIC_VERSION = '2023-06-01'
+const DEFAULT_MODEL = 'claude-sonnet-4-5'
 
 export default async function handler(req, res) {
-  // CORS
-  res.setHeader('Access-Control-Allow-Origin', '*')
-  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS')
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-api-key')
-
-  if (req.method === 'OPTIONS') {
-    return res.status(204).end()
-  }
-
   if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'Method not allowed' })
+    res.setHeader('Allow', 'POST')
+    return res.status(405).json({ error: { message: 'Method not allowed' } })
   }
 
-  // Log para confirmar runtime al revisar Vercel logs
-  console.log('[generate] runtime=node, maxDuration=60s')
+  const apiKey = req.headers['x-api-key'] || req.headers['X-Api-Key']
+  if (!apiKey) {
+    return res.status(400).json({ error: { message: 'Missing X-Api-Key header' } })
+  }
 
+  // Vercel parsea req.body automáticamente para JSON
+  const { system, messages, max_tokens, model, stream } = req.body || {}
+  if (!Array.isArray(messages) || messages.length === 0) {
+    return res.status(400).json({ error: { message: 'messages[] is required' } })
+  }
+
+  const anthropicPayload = {
+    model: model || DEFAULT_MODEL,
+    system: system || undefined,
+    messages,
+    max_tokens: max_tokens || 4000,
+    stream: stream === true,
+  }
+
+  // ===========================================================================
+  // MODO NO-STREAMING — devuelve JSON completo (para extract)
+  // ===========================================================================
+  if (!stream) {
+    try {
+      const upstream = await fetch(ANTHROPIC_URL, {
+        method: 'POST',
+        headers: {
+          'x-api-key': apiKey,
+          'anthropic-version': ANTHROPIC_VERSION,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify(anthropicPayload),
+      })
+      const text = await upstream.text()
+      res.status(upstream.status)
+      res.setHeader('Content-Type', 'application/json')
+      return res.send(text)
+    } catch (e) {
+      return res.status(500).json({ error: { message: e.message || 'Upstream fetch failed' } })
+    }
+  }
+
+  // ===========================================================================
+  // MODO STREAMING — pipea SSE directo al cliente
+  // ===========================================================================
   try {
-    const body = req.body
-    const apiKey = req.headers['x-api-key'] || process.env.ANTHROPIC_API_KEY
-
-    if (!apiKey) {
-      return res.status(401).json({
-        error: 'Missing API key (header x-api-key or env ANTHROPIC_API_KEY)',
-      })
-    }
-
-    if (!body || !body.messages || !Array.isArray(body.messages)) {
-      return res.status(400).json({
-        error: 'Missing required field: messages (array)',
-      })
-    }
-
-    const startedAt = Date.now()
-    const r = await fetch('https://api.anthropic.com/v1/messages', {
+    const upstream = await fetch(ANTHROPIC_URL, {
       method: 'POST',
       headers: {
-        'Content-Type': 'application/json',
         'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
+        'anthropic-version': ANTHROPIC_VERSION,
+        'content-type': 'application/json',
+        'accept': 'text/event-stream',
       },
-      body: JSON.stringify({
-        model: body.model || 'claude-sonnet-4-5-20250929',
-        max_tokens: body.max_tokens || 4000,
-        system: body.system,
-        messages: body.messages,
-      }),
+      body: JSON.stringify(anthropicPayload),
     })
 
-    const elapsed = Date.now() - startedAt
-    console.log(`[generate] Claude responded in ${elapsed}ms with status ${r.status}`)
+    // Si la API rechaza el request, devolvemos el error en JSON (no SSE)
+    if (!upstream.ok) {
+      const errText = await upstream.text()
+      let errJson
+      try { errJson = JSON.parse(errText) } catch { errJson = { error: { message: errText } } }
+      return res.status(upstream.status).json(errJson)
+    }
 
-    const data = await r.json()
-    return res.status(r.status).json(data)
+    // Headers SSE
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8')
+    res.setHeader('Cache-Control', 'no-cache, no-transform')
+    res.setHeader('Connection', 'keep-alive')
+    res.setHeader('X-Accel-Buffering', 'no') // evita buffering en proxies tipo nginx
+    res.flushHeaders?.()
+
+    const reader = upstream.body.getReader()
+    const decoder = new TextDecoder()
+
+    // Pipea chunks directamente. Anthropic ya emite eventos SSE bien formateados,
+    // así que no necesitamos re-parsear: solo reenviamos bytes.
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      res.write(decoder.decode(value, { stream: true }))
+    }
+
+    res.end()
   } catch (e) {
-    console.error('[generate] Error:', e)
-    return res.status(500).json({ error: e.message || 'Internal error' })
+    // Si todavía no mandamos headers, devolvemos JSON. Si ya empezamos a
+    // streamear, escribimos un evento error SSE y cerramos.
+    if (!res.headersSent) {
+      return res.status(500).json({ error: { message: e.message || 'Stream failed' } })
+    }
+    try {
+      res.write(`event: error\ndata: ${JSON.stringify({ message: e.message })}\n\n`)
+    } catch {}
+    res.end()
   }
 }
