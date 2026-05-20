@@ -2,7 +2,8 @@ import { useState, useRef, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   extractAllText, buildChunks, extractBasicInfo, generateSection,
-  extractExtraFileText, buildCalculos
+  extractExtraFileText, buildCalculos,
+  tryParsePlanillaCALM, detectarEsEnfermedad,
 } from '../lib/claude'
 import {
   buildAdhesionPrimera, buildAdhesionSegunda, detectarVarianteWeiss
@@ -43,7 +44,7 @@ const STEPS = [
 const GEN_STEPS = [
   'Leyendo el PDF del expediente...',
   'Procesando archivos adicionales...',
-  'Buscando RIPTE actual...',
+  'Detectando planilla CALM...',
   'Extrayendo datos básicos del expediente...',
   'Redactando antecedentes y hechos...',
   'Redactando resolución y pericia médica...',
@@ -56,11 +57,10 @@ const GEN_STEPS = [
 function getTipoArchivo(f) {
   const name = f.name.toLowerCase()
   if (name.endsWith('.pdf')) return 'pdf'
-  if (name.endsWith('.xlsx') || name.endsWith('.xls')) return 'excel'
+  if (name.endsWith('.xlsx') || name.endsWith('.xls') || name.endsWith('.xlsm')) return 'excel'
   return 'otro'
 }
 
-// Normaliza fechas del estilo "31/03/2021" o "31 de marzo de 2021" → "2021-03-31"
 function normalizarFecha(s) {
   if (!s) return ''
   if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s
@@ -75,11 +75,18 @@ function normalizarFecha(s) {
   return ''
 }
 
-// Chip pequeño que indica que un campo fue autocompletado desde el PDF
-function ChipAuto() {
+function ChipAuto({ tipo = 'auto' }) {
+  const colores = {
+    auto: 'bg-blue-100 text-blue-700',
+    planilla: 'bg-emerald-100 text-emerald-700',
+  }
+  const etiquetas = {
+    auto: 'auto',
+    planilla: 'planilla CALM',
+  }
   return (
-    <span className="ml-2 px-1.5 py-0.5 bg-blue-100 text-blue-700 rounded text-xs font-medium align-middle">
-      auto
+    <span className={`ml-2 px-1.5 py-0.5 rounded text-xs font-medium align-middle ${colores[tipo]}`}>
+      {etiquetas[tipo]}
     </span>
   )
 }
@@ -118,13 +125,77 @@ export default function NewSentence({ profile, session }) {
   const [sentenceText, setSentenceText] = useState('')
   const [savedId, setSavedId] = useState(null)
 
-  // ── PARCHE: estados de precarga ──────────────────────────────────────────
   const [prefetching, setPrefetching] = useState(false)
   const [prefetchDone, setPrefetchDone] = useState(false)
   const [prefetchError, setPrefetchError] = useState('')
   const [prefilledFields, setPrefilledFields] = useState({})
   const [cachedChunks, setCachedChunks] = useState(null)
-  // ────────────────────────────────────────────────────────────────────────
+
+  // === NUEVO v2.4: planilla CALM ===
+  const [calmParsed, setCalmParsed] = useState(null)
+  const [calmFileName, setCalmFileName] = useState('')
+  const [calmDetecting, setCalmDetecting] = useState(false)
+
+  // Detectar planilla CALM al agregar archivos extras (.xlsx/.xlsm)
+  useEffect(() => {
+    const archivosExtra = files.filter(f => f.tipo !== 'pdf' || f.id !== files.find(g => g.tipo === 'pdf')?.id)
+      .filter(f => f.tipo === 'excel')
+    if (archivosExtra.length === 0) {
+      setCalmParsed(null)
+      setCalmFileName('')
+      return
+    }
+    // Solo procesamos el primer Excel encontrado (asumimos uno solo)
+    const primerExcel = archivosExtra[0]
+    if (calmFileName === primerExcel.file.name) return // ya procesado
+
+    setCalmDetecting(true)
+    tryParsePlanillaCALM(primerExcel.file)
+      .then(parsed => {
+        if (parsed) {
+          setCalmParsed(parsed)
+          setCalmFileName(primerExcel.file.name)
+          console.log('📊 Planilla CALM detectada:', parsed)
+          // Autocompletar campos del form con los valores de la planilla
+          if (parsed.meta?.fechaAccidente) {
+            const iso = parsed.meta.fechaAccidente.toISOString().slice(0, 10)
+            setCalcInputs(p => ({ ...p, fechaAccidente: iso }))
+            setPrefilledFields(p => ({ ...p, fechaAccidente: true }))
+          }
+          if (parsed.meta?.ripteAccidente) {
+            setCalcInputs(p => ({ ...p, ripteAccidente: parsed.meta.ripteAccidente.toLocaleString('es-AR', { minimumFractionDigits: 2 }) }))
+            setPrefilledFields(p => ({ ...p, ripteAccidente: true }))
+          }
+          if (parsed.meta?.edad) {
+            setCalcInputs(p => ({ ...p, edadActor: String(parsed.meta.edad) }))
+            setPrefilledFields(p => ({ ...p, edadActor: true }))
+          }
+          if (parsed.meta?.porcentajeIncapacidadPct) {
+            setCalcInputs(p => ({ ...p, porcentajeIncapacidad: String(parsed.meta.porcentajeIncapacidadPct).replace('.', ',') }))
+            setPrefilledFields(p => ({ ...p, porcentajeIncapacidad: true }))
+          }
+          if (parsed.calculos?.ibmRipteIndividual) {
+            const ibm = parsed.calculos.ibmRipteIndividual.toLocaleString('es-AR', { minimumFractionDigits: 2 })
+            setCalcInputs(p => ({ ...p, ibmBruto: ibm }))
+            setPrefilledFields(p => ({ ...p, ibmBruto: true }))
+          }
+          if (parsed.calculos?.bna?.ibm && parsed.calculos?.ibmRipteIndividual) {
+            const intereses = parsed.calculos.bna.ibm - parsed.calculos.ibmRipteIndividual
+            setCalcInputs(p => ({ ...p, intereseseBNA: intereses.toLocaleString('es-AR', { minimumFractionDigits: 2 }) }))
+            setPrefilledFields(p => ({ ...p, intereseseBNA: true }))
+          }
+        } else {
+          setCalmParsed(null)
+          setCalmFileName('')
+        }
+      })
+      .catch(e => {
+        console.warn('Error parseando planilla CALM:', e)
+        setCalmParsed(null)
+        setCalmFileName('')
+      })
+      .finally(() => setCalmDetecting(false))
+  }, [files])
 
   // Auto-fetch RIPTE actual al entrar al paso 2
   useEffect(() => {
@@ -140,19 +211,18 @@ export default function NewSentence({ profile, session }) {
     }
   }, [step])
 
-  // ── PARCHE: al cambiar la fecha del accidente, autocompletar RIPTE del mes ──
+  // RIPTE histórico al cambiar fechaAccidente (si no vino de planilla)
   useEffect(() => {
     const fecha = calcInputs.fechaAccidente
     if (!fecha || !/^\d{4}-\d{2}-\d{2}$/.test(fecha)) return
-    // No sobreescribir si el usuario ya puso algo manualmente
     if (calcInputs.ripteAccidente && !prefilledFields.ripteAccidente) return
+    if (calmParsed) return // si hay planilla CALM, ella manda
     const valor = getRipteFechaAccidente(fecha)
     if (valor) {
       setCalcInputs(p => ({ ...p, ripteAccidente: valor }))
       setPrefilledFields(p => ({ ...p, ripteAccidente: true }))
     }
   }, [calcInputs.fechaAccidente])
-  // ────────────────────────────────────────────────────────────────────────
 
   function addFiles(newFiles) {
     const added = newFiles.map(f => ({
@@ -161,7 +231,9 @@ export default function NewSentence({ profile, session }) {
     setFiles(prev => [...prev, ...added])
   }
 
-  function removeFile(id) { setFiles(prev => prev.filter(f => f.id !== id)) }
+  function removeFile(id) {
+    setFiles(prev => prev.filter(f => f.id !== id))
+  }
 
   function getExpedientePDF() { return files.find(f => f.tipo === 'pdf') }
 
@@ -170,81 +242,46 @@ export default function NewSentence({ profile, session }) {
     return files.filter(f => f.id !== exp?.id)
   }
 
-  // ── PARCHE: extracción anticipada al pasar al Paso 2 ────────────────────
   async function prefetchFromPDF() {
+    if (prefetchDone || prefetching) return
+    const apiKey = profile.anthropic_api_key
+    if (!apiKey) return
+    const expedientePDF = getExpedientePDF()
+    if (!expedientePDF) return
 
-  if (prefetchDone || prefetching) return
-
-  const apiKey = profile.anthropic_api_key
-
-  if (!apiKey) return
-
-  const expedientePDF = getExpedientePDF()
-
-  if (!expedientePDF) return
-
-
-
-  setPrefetching(true)
-
-  setPrefetchError('')
-
-  try {
-
-    const { fullText } = await extractAllText(expedientePDF.file)
-
-
-
-    // NUEVO: validar antes de continuar
-
-    if (!fullText || fullText.trim().length < 100) {
-
-      throw new Error('No se pudo extraer texto del PDF')
-
-    }
-
-
-
-    const chunks = buildChunks(fullText, [])
-
-    setCachedChunks(chunks)
-
-
-
-    // NUEVO: validar chunks antes de llamar a la API
-
-    if (!chunks?.header) {
-
-      throw new Error('No se pudo procesar el encabezado del expediente')
-
-    }
+    setPrefetching(true)
+    setPrefetchError('')
+    try {
+      const { fullText } = await extractAllText(expedientePDF.file)
+      const chunks = buildChunks(fullText, [])
+      setCachedChunks(chunks)
 
       const data = await extractBasicInfo(apiKey, chunks)
       if (data._parseError) throw new Error('La IA no devolvió un JSON válido')
 
-      setExtractedData(data)                    // lo reutiliza generate()
+      setExtractedData(data)
 
-      // Mapear campos extraídos → calcInputs
-      const prefilled = {}
+      const prefilled = { ...prefilledFields }
       const updates = {}
 
-      if (data.accidente?.fecha) {
-        const f = normalizarFecha(data.accidente.fecha)
-        if (f) { updates.fechaAccidente = f; prefilled.fechaAccidente = true }
-      }
-      if (data.actor?.edad_al_accidente) {
-        updates.edadActor = String(data.actor.edad_al_accidente)
-        prefilled.edadActor = true
-      }
-      if (data.pericia_medica?.incapacidad_total_perito) {
-        updates.porcentajeIncapacidad = String(
-          data.pericia_medica.incapacidad_total_perito
-        ).replace('.', ',')
-        prefilled.porcentajeIncapacidad = true
-      }
-      if (data.ibm_bruto_afip) {
-        updates.ibmBruto = String(data.ibm_bruto_afip).replace('.', ',')
-        prefilled.ibmBruto = true
+      // Solo precargamos del PDF lo que la planilla CALM NO precargó
+      if (!calmParsed) {
+        if (data.accidente?.fecha) {
+          const f = normalizarFecha(data.accidente.fecha)
+          if (f) { updates.fechaAccidente = f; prefilled.fechaAccidente = true }
+        }
+        if (data.actor?.edad_al_accidente) {
+          updates.edadActor = String(data.actor.edad_al_accidente)
+          prefilled.edadActor = true
+        }
+        if (data.pericia_medica?.incapacidad_total_perito) {
+          updates.porcentajeIncapacidad = String(data.pericia_medica.incapacidad_total_perito).replace('.', ',')
+          prefilled.porcentajeIncapacidad = true
+        }
+        if (data.ibm_bruto_afip) {
+          updates.ibmBruto = String(data.ibm_bruto_afip).replace('.', ',')
+          prefilled.ibmBruto = true
+        }
       }
 
       setCalcInputs(prev => ({ ...prev, ...updates }))
@@ -257,7 +294,6 @@ export default function NewSentence({ profile, session }) {
       setPrefetching(false)
     }
   }
-  // ────────────────────────────────────────────────────────────────────────
 
   async function abrirCalculadorCABA() {
     if (!calcInputs.fechaAccidente || !calcInputs.ibmBruto) {
@@ -315,18 +351,19 @@ export default function NewSentence({ profile, session }) {
     if (!expedientePDF) { setGenError('No hay PDF del expediente cargado.'); return }
 
     try {
-      // ── PARCHE: reutilizar chunks y extractedData del prefetch ───────────
-      const archivosExtra = getArchivosExtra()
+      // === Procesamiento de chunks ===
+      // Filtrar archivos extras: el Excel CALM se procesa aparte, no como texto
+      const archivosExtra = getArchivosExtra().filter(f =>
+        !(calmFileName && f.file.name === calmFileName)
+      )
       let chunks
 
       if (cachedChunks && archivosExtra.length === 0) {
-        // Camino rápido: el prefetch ya leyó el PDF sin archivos extra
         chunks = cachedChunks
         setGenStep(0); setGenProgress(5)
         await new Promise(r => setTimeout(r, 150))
         setGenStep(1); setGenProgress(22)
       } else {
-        // Extracción completa (hay archivos extra o no hubo prefetch)
         setGenStep(0); setGenProgress(5)
         const { fullText } = await extractAllText(expedientePDF.file, (pct) => {
           setGenSubProgress(pct)
@@ -345,19 +382,36 @@ export default function NewSentence({ profile, session }) {
         chunks = buildChunks(fullText, extraTexts)
       }
 
+      // === Detección de planilla CALM ===
       setGenStep(2); setGenProgress(28)
-      await new Promise(r => setTimeout(r, 300))
+      await new Promise(r => setTimeout(r, 200))
+      if (calmParsed) {
+        console.log('📊 Usando planilla CALM como fuente de cálculos')
+      } else {
+        console.log('📊 No hay planilla CALM, usando cálculo manual')
+      }
 
+      // === Extract LLM ===
       setGenStep(3); setGenProgress(35)
-      // Reutilizar datos del prefetch si están disponibles y son válidos
       let data = (extractedData && !extractedData._parseError) ? extractedData : null
       if (!data) {
         data = await extractBasicInfo(apiKey, chunks)
         setExtractedData(data)
       }
-      // ────────────────────────────────────────────────────────────────────
 
-      const calculos = buildCalculos(config, data)
+      // === Detección dual de enfermedad profesional ===
+      const esEnfermedad = detectarEsEnfermedad(chunks, data)
+      console.log(`🩺 Tipo detectado: ${esEnfermedad ? 'ENFERMEDAD PROFESIONAL' : 'ACCIDENTE DE TRABAJO'}`)
+
+      // Forzar el tipo en data para que los prompts lo respeten
+      if (esEnfermedad) {
+        data.tipo_accion_detectado = data.tipo_accion_detectado || 'Enfermedad profesional - Acción especial'
+      } else if (!data.tipo_accion_detectado) {
+        data.tipo_accion_detectado = 'Acción especial - Ley 24.557'
+      }
+
+      // === Construcción de cálculos (planilla CALM tiene prioridad) ===
+      const calculos = buildCalculos(config, data, calmParsed, esEnfermedad)
       console.log('Cálculos:', calculos)
       console.log('Variante Weiss:', detectarVarianteWeiss(calculos, data))
 
@@ -432,11 +486,11 @@ export default function NewSentence({ profile, session }) {
 
   const expedientePDF = getExpedientePDF()
 
-  const camposCalculoOK = calcInputs.ripteAccidente
-    && calcInputs.intereseseBNA
-    && calcInputs.ibmBruto
-    && calcInputs.edadActor
-    && calcInputs.porcentajeIncapacidad
+  // Validación: con planilla CALM, los campos de cálculo son opcionales (los tomamos de la planilla)
+  const camposCalculoOK = calmParsed
+    ? calmParsed.esValida
+    : (calcInputs.ripteAccidente && calcInputs.intereseseBNA && calcInputs.ibmBruto
+       && calcInputs.edadActor && calcInputs.porcentajeIncapacidad)
 
   return (
     <div className="min-h-screen bg-slate-50">
@@ -471,13 +525,12 @@ export default function NewSentence({ profile, session }) {
 
       <main className="max-w-4xl mx-auto px-6 py-8">
 
-        {/* ═══ PASO 0 — ARCHIVOS ══════════════════════════════════════════════ */}
         {step === 0 && (
           <div>
             <div className="mb-6">
               <h2 className="text-xl font-semibold text-slate-800">Paso 1 — Archivos del expediente</h2>
               <p className="text-slate-500 text-sm mt-1">
-                Suba el PDF del expediente y, opcionalmente, archivos con las remuneraciones (PDF o Excel).
+                Subí el PDF del expediente y la planilla del CALM en Excel con los salarios cargados.
               </p>
             </div>
 
@@ -496,15 +549,14 @@ export default function NewSentence({ profile, session }) {
               <input
                 ref={fileRef}
                 type="file"
-                accept=".pdf,.xlsx,.xls"
+                accept=".pdf,.xlsx,.xls,.xlsm"
                 multiple
                 className="hidden"
                 onChange={e => addFiles(Array.from(e.target.files))}
               />
               <div className="text-4xl mb-3">📂</div>
-              <p className="font-medium text-slate-700">Arrastrá los archivos aquí o hacé clic para seleccionar</p>
-              <p className="text-sm text-slate-400 mt-2">PDF (expediente y/o remuneraciones) · Excel (remuneraciones)</p>
-              <p className="text-xs text-slate-400 mt-1">Podés subir varios archivos a la vez</p>
+              <p className="font-medium text-slate-700">Arrastrá los archivos o hacé clic para seleccionar</p>
+              <p className="text-sm text-slate-400 mt-2">PDF expediente · Excel planilla CALM (con datos cargados)</p>
             </div>
 
             {files.length > 0 && (
@@ -522,6 +574,11 @@ export default function NewSentence({ profile, session }) {
                             Expediente principal
                           </span>
                         )}
+                        {f.tipo === 'excel' && calmFileName === f.file.name && calmParsed?.esValida && (
+                          <span className="ml-2 px-1.5 py-0.5 bg-emerald-100 text-emerald-700 rounded text-xs font-medium">
+                            Planilla CALM ✓
+                          </span>
+                        )}
                       </p>
                     </div>
                     <button onClick={() => removeFile(f.id)}
@@ -537,6 +594,22 @@ export default function NewSentence({ profile, session }) {
               </div>
             )}
 
+            {calmDetecting && (
+              <div className="mt-3 p-3 bg-blue-50 border border-blue-200 rounded-lg text-blue-700 text-sm flex items-center gap-2">
+                <span className="w-3 h-3 border-2 border-blue-400 border-t-blue-700 rounded-full animate-spin"></span>
+                Analizando planilla CALM...
+              </div>
+            )}
+
+            {calmParsed && !calmParsed.esValida && (
+              <div className="mt-3 p-3 bg-amber-50 border border-amber-200 rounded-lg text-amber-700 text-sm">
+                <p className="font-medium mb-1">⚠ Planilla CALM detectada con problemas:</p>
+                <ul className="list-disc list-inside text-xs">
+                  {calmParsed.problemas.map((p, i) => <li key={i}>{p}</li>)}
+                </ul>
+              </div>
+            )}
+
             {files.length > 0 && !expedientePDF && (
               <div className="mt-3 p-3 bg-amber-50 border border-amber-200 rounded-lg text-amber-700 text-sm">
                 ⚠ Se necesita al menos un PDF con el expediente.
@@ -546,10 +619,7 @@ export default function NewSentence({ profile, session }) {
             <div className="mt-6 flex justify-end">
               <button
                 disabled={!expedientePDF}
-                onClick={() => {
-                  setStep(1)
-                  prefetchFromPDF()   // extracción anticipada en segundo plano
-                }}
+                onClick={() => { setStep(1); prefetchFromPDF() }}
                 className="px-6 py-3 bg-blue-900 text-white rounded-xl font-medium text-sm hover:bg-blue-800 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
               >
                 Continuar →
@@ -558,13 +628,12 @@ export default function NewSentence({ profile, session }) {
           </div>
         )}
 
-        {/* ═══ PASO 1 — CONFIGURACIÓN ════════════════════════════════════════ */}
         {step === 1 && (
           <div>
             <div className="mb-6">
               <h2 className="text-xl font-semibold text-slate-800">Paso 2 — Configuración</h2>
               <p className="text-slate-500 text-sm mt-1">
-                Complete los datos del cálculo. El tipo de acción y los nombres se detectan automáticamente.
+                Datos del cálculo. El tipo de acción y los nombres se detectan automáticamente.
               </p>
             </div>
 
@@ -574,7 +643,7 @@ export default function NewSentence({ profile, session }) {
               <div className="bg-white rounded-xl border border-slate-200 p-5">
                 <h3 className="font-medium text-slate-800 mb-1">Orden de votación</h3>
                 <p className="text-xs text-slate-400 mb-4">
-                  Seleccione el resultado del sorteo. La Dra. Weiss siempre vota en tercer lugar.
+                  Resultado del sorteo. La Dra. Weiss siempre vota en tercer lugar.
                 </p>
                 <div className="space-y-3">
                   {OPCIONES_VOTO.map((op, i) => (
@@ -586,9 +655,6 @@ export default function NewSentence({ profile, session }) {
                         className="accent-blue-900 w-4 h-4" />
                       <div>
                         <p className="font-medium text-slate-800 text-sm">{op.label}</p>
-                        <p className="text-xs text-slate-400 mt-0.5">
-                          {op.juez1.corto} vota primero · {op.juez2.corto} adhiere · Dra. Weiss vota con salvedad art. 7 ley 23.928
-                        </p>
                       </div>
                     </label>
                   ))}
@@ -598,207 +664,208 @@ export default function NewSentence({ profile, session }) {
               {/* RIPTE ACTUAL */}
               <div className="bg-white rounded-xl border border-slate-200 p-5">
                 <h3 className="font-medium text-slate-800 mb-1">RIPTE actual (último publicado)</h3>
-                <p className="text-xs text-slate-400 mb-3">Se busca automáticamente.</p>
-                {ripteAuto.loading ? (
+                {calmParsed?.calculos?.ripteActual ? (
+                  <div className="mt-2 p-3 bg-emerald-50 border border-emerald-200 rounded-lg">
+                    <p className="text-xs text-emerald-600 font-medium">RIPTE de la planilla CALM <ChipAuto tipo="planilla" /></p>
+                    <p className="text-2xl font-bold text-emerald-700 font-mono">
+                      $ {calmParsed.calculos.ripteActual.toLocaleString('es-AR', { minimumFractionDigits: 2 })}
+                    </p>
+                  </div>
+                ) : ripteAuto.loading ? (
                   <div className="flex items-center gap-2 text-sm text-slate-500">
                     <span className="w-4 h-4 border-2 border-slate-300 border-t-slate-600 rounded-full animate-spin"></span>
                     Buscando valor oficial...
                   </div>
                 ) : ripteAuto.valor ? (
-                  <div className="flex items-center gap-3 flex-wrap">
-                    <div className="px-4 py-2.5 bg-green-50 border border-green-200 rounded-lg">
-                      <p className="text-xs text-green-600 font-medium">RIPTE oficial</p>
-                      <p className="text-2xl font-bold text-green-700 font-mono">$ {ripteAuto.valor}</p>
-                      {ripteAuto.fecha && <p className="text-xs text-green-500">{ripteAuto.fecha}</p>}
-                    </div>
+                  <div className="px-4 py-2.5 bg-green-50 border border-green-200 rounded-lg inline-block">
+                    <p className="text-xs text-green-600 font-medium">RIPTE oficial</p>
+                    <p className="text-2xl font-bold text-green-700 font-mono">$ {ripteAuto.valor}</p>
+                    {ripteAuto.fecha && <p className="text-xs text-green-500">{ripteAuto.fecha}</p>}
                   </div>
                 ) : (
-                  <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg text-amber-700 text-sm mb-3">
-                    No se pudo obtener automáticamente. Ingréselo manualmente.
-                  </div>
-                )}
-                <div className="mt-3">
-                  <label className="block text-xs font-medium text-slate-600 mb-1">
-                    {ripteAuto.valor ? 'Corregir manualmente (opcional)' : 'Valor del RIPTE *'}
-                  </label>
                   <input
                     value={ripteManual}
                     onChange={e => setRipteManual(e.target.value)}
-                    placeholder={ripteAuto.valor || 'Ej: 202.963,20'}
-                    className="px-3 py-2 border border-slate-200 rounded-lg text-sm w-48 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    placeholder="Ej: 202.963,20"
+                    className="px-3 py-2 border border-slate-200 rounded-lg text-sm w-48"
                   />
-                </div>
+                )}
               </div>
+
+              {/* PLANILLA CALM — banner si está cargada */}
+              {calmParsed?.esValida && (
+                <div className="bg-emerald-50 border-2 border-emerald-300 rounded-xl p-5">
+                  <div className="flex items-start gap-3">
+                    <span className="text-2xl">📊</span>
+                    <div className="flex-1">
+                      <h3 className="font-semibold text-emerald-800">Planilla CALM detectada y validada</h3>
+                      <p className="text-sm text-emerald-700 mt-1">
+                        Los cálculos numéricos vienen directamente de la planilla. Los campos de abajo se autocompletaron desde ahí.
+                      </p>
+                      <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
+                        <div><span className="font-medium text-emerald-800">IBM bruto:</span> <span className="text-emerald-700 font-mono">${calmParsed.calculos.ibmRipteIndividual.toLocaleString('es-AR', { minimumFractionDigits: 2 })}</span></div>
+                        <div><span className="font-medium text-emerald-800">IBM con RIPTE:</span> <span className="text-emerald-700 font-mono">${calmParsed.calculos.riptePuro.ibm.toLocaleString('es-AR', { minimumFractionDigits: 2 })}</span></div>
+                        <div><span className="font-medium text-emerald-800">Indem. RIPTE (sin 20%):</span> <span className="text-emerald-700 font-mono">${calmParsed.calculos.riptePuro.indemnizacionBase.toLocaleString('es-AR', { minimumFractionDigits: 2 })}</span></div>
+                        <div><span className="font-medium text-emerald-800">Indem. RIPTE (+20%):</span> <span className="text-emerald-700 font-mono">${calmParsed.calculos.riptePuro.total.toLocaleString('es-AR', { minimumFractionDigits: 2 })}</span></div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
 
               {/* DATOS DEL CÁLCULO */}
               <div className="bg-white rounded-xl border border-slate-200 p-5">
                 <h3 className="font-medium text-slate-800 mb-1">Datos del cálculo de indemnización</h3>
                 <p className="text-xs text-slate-400 mb-3">
-                  Todos los campos son obligatorios. La IA usará estos valores para la comparación tasa BNA vs RIPTE y declarar inconstitucionalidad del art. 12 LRT si corresponde.
+                  {calmParsed?.esValida
+                    ? 'Datos tomados de la planilla CALM. Estos campos son solo informativos.'
+                    : 'Todos los campos son obligatorios.'}
                 </p>
 
-                {/* ── PARCHE: banners de estado del prefetch ── */}
                 {prefetching && (
                   <div className="mb-4 p-3 bg-blue-50 border border-blue-200 rounded-lg flex items-center gap-2">
                     <span className="w-3 h-3 border-2 border-blue-400 border-t-blue-700 rounded-full animate-spin shrink-0"></span>
-                    <span className="text-sm text-blue-700">
-                      Leyendo el expediente y precargando datos… (5–10 seg)
-                    </span>
+                    <span className="text-sm text-blue-700">Leyendo el expediente y precargando datos…</span>
                   </div>
                 )}
-                {prefetchDone && Object.keys(prefilledFields).length > 0 && (
+                {prefetchDone && Object.keys(prefilledFields).length > 0 && !calmParsed && (
                   <div className="mb-4 p-3 bg-green-50 border border-green-200 rounded-lg">
                     <p className="text-sm text-green-700">
-                      ✓ Datos precargados desde el PDF. Revisá los campos marcados con{' '}
-                      <span className="px-1.5 py-0.5 bg-blue-100 text-blue-700 rounded text-xs font-medium">auto</span>
-                      {' '}y completá los faltantes. Los intereses BNA siempre se ingresan a mano.
+                      ✓ Datos precargados desde el PDF. Los marcados con <ChipAuto /> los detectó la IA.
                     </p>
                   </div>
                 )}
                 {prefetchError && (
                   <div className="mb-4 p-3 bg-amber-50 border border-amber-200 rounded-lg">
-                    <p className="text-sm text-amber-700">
-                      ⚠ No se pudo precargar: {prefetchError}. Completá los campos a mano.
-                    </p>
+                    <p className="text-sm text-amber-700">⚠ No se pudo precargar: {prefetchError}.</p>
                   </div>
                 )}
-                {/* ─────────────────────────────────────────── */}
 
                 <div className="grid grid-cols-2 gap-4">
                   <div>
                     <label className="block text-xs font-medium text-slate-600 mb-1">
                       Fecha del accidente *
-                      {prefilledFields.fechaAccidente && <ChipAuto />}
+                      {calmParsed && prefilledFields.fechaAccidente ? <ChipAuto tipo="planilla" /> : prefilledFields.fechaAccidente && <ChipAuto />}
                     </label>
                     <input
                       type="date"
                       value={calcInputs.fechaAccidente}
-                      onChange={e => {
-                        setCalcInputs(p => ({ ...p, fechaAccidente: e.target.value }))
-                        // Si el usuario edita la fecha manualmente, limpiar el chip
-                        setPrefilledFields(p => ({ ...p, fechaAccidente: false, ripteAccidente: false }))
-                        setCalcInputs(p => ({ ...p, fechaAccidente: e.target.value, ripteAccidente: '' }))
-                      }}
-                      className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      disabled={!!calmParsed}
+                      onChange={e => setCalcInputs(p => ({ ...p, fechaAccidente: e.target.value }))}
+                      className={`w-full px-3 py-2 border border-slate-200 rounded-lg text-sm ${calmParsed ? 'bg-slate-50 cursor-not-allowed' : ''}`}
                     />
                   </div>
 
                   <div>
                     <label className="block text-xs font-medium text-slate-600 mb-1">
                       RIPTE del mes del accidente *
-                      {prefilledFields.ripteAccidente && <ChipAuto />}
+                      {calmParsed && prefilledFields.ripteAccidente ? <ChipAuto tipo="planilla" /> : prefilledFields.ripteAccidente && <ChipAuto />}
                     </label>
                     <input
                       value={calcInputs.ripteAccidente}
-                      onChange={e => {
-                        setCalcInputs(p => ({ ...p, ripteAccidente: e.target.value }))
-                        setPrefilledFields(p => ({ ...p, ripteAccidente: false }))
-                      }}
-                      placeholder="Ej: 8.665,19"
-                      className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      disabled={!!calmParsed}
+                      onChange={e => setCalcInputs(p => ({ ...p, ripteAccidente: e.target.value }))}
+                      placeholder="Ej: 7.076,47"
+                      className={`w-full px-3 py-2 border border-slate-200 rounded-lg text-sm ${calmParsed ? 'bg-slate-50 cursor-not-allowed' : ''}`}
                     />
                   </div>
 
                   <div>
                     <label className="block text-xs font-medium text-slate-600 mb-1">
                       IBM bruto AFIP *
-                      {prefilledFields.ibmBruto && <ChipAuto />}
+                      {calmParsed && prefilledFields.ibmBruto ? <ChipAuto tipo="planilla" /> : prefilledFields.ibmBruto && <ChipAuto />}
                     </label>
                     <input
                       value={calcInputs.ibmBruto}
-                      onChange={e => {
-                        setCalcInputs(p => ({ ...p, ibmBruto: e.target.value }))
-                        setPrefilledFields(p => ({ ...p, ibmBruto: false }))
-                      }}
-                      placeholder="Ej: 43.369,60"
-                      className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      disabled={!!calmParsed}
+                      onChange={e => setCalcInputs(p => ({ ...p, ibmBruto: e.target.value }))}
+                      placeholder="Ej: 54.784,59"
+                      className={`w-full px-3 py-2 border border-slate-200 rounded-lg text-sm ${calmParsed ? 'bg-slate-50 cursor-not-allowed' : ''}`}
                     />
-                    <p className="text-xs text-slate-400 mt-0.5">Promedio últimos 12 meses</p>
                   </div>
 
                   <div>
                     <label className="block text-xs font-medium text-slate-600 mb-1">
-                      Edad del actor al accidente *
-                      {prefilledFields.edadActor && <ChipAuto />}
+                      Edad del actor *
+                      {calmParsed && prefilledFields.edadActor ? <ChipAuto tipo="planilla" /> : prefilledFields.edadActor && <ChipAuto />}
                     </label>
                     <input
                       type="number"
                       value={calcInputs.edadActor}
-                      onChange={e => {
-                        setCalcInputs(p => ({ ...p, edadActor: e.target.value }))
-                        setPrefilledFields(p => ({ ...p, edadActor: false }))
-                      }}
-                      placeholder="Ej: 37"
-                      className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      disabled={!!calmParsed}
+                      onChange={e => setCalcInputs(p => ({ ...p, edadActor: e.target.value }))}
+                      placeholder="Ej: 52"
+                      className={`w-full px-3 py-2 border border-slate-200 rounded-lg text-sm ${calmParsed ? 'bg-slate-50 cursor-not-allowed' : ''}`}
                     />
                   </div>
 
                   <div>
                     <label className="block text-xs font-medium text-slate-600 mb-1">
                       % de incapacidad total *
-                      {prefilledFields.porcentajeIncapacidad && <ChipAuto />}
+                      {calmParsed && prefilledFields.porcentajeIncapacidad ? <ChipAuto tipo="planilla" /> : prefilledFields.porcentajeIncapacidad && <ChipAuto />}
                     </label>
                     <input
                       value={calcInputs.porcentajeIncapacidad}
-                      onChange={e => {
-                        setCalcInputs(p => ({ ...p, porcentajeIncapacidad: e.target.value }))
-                        setPrefilledFields(p => ({ ...p, porcentajeIncapacidad: false }))
-                      }}
-                      placeholder="Ej: 3,8"
-                      className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      disabled={!!calmParsed}
+                      onChange={e => setCalcInputs(p => ({ ...p, porcentajeIncapacidad: e.target.value }))}
+                      placeholder="Ej: 22,5"
+                      className={`w-full px-3 py-2 border border-slate-200 rounded-lg text-sm ${calmParsed ? 'bg-slate-50 cursor-not-allowed' : ''}`}
                     />
-                    <p className="text-xs text-slate-400 mt-0.5">Incluye factores de ponderación</p>
                   </div>
 
                   <div>
                     <label className="block text-xs font-medium text-slate-600 mb-1">
                       Intereses tasa activa BNA *
+                      {calmParsed && prefilledFields.intereseseBNA ? <ChipAuto tipo="planilla" /> : null}
                     </label>
                     <input
                       value={calcInputs.intereseseBNA}
+                      disabled={!!calmParsed}
                       onChange={e => setCalcInputs(p => ({ ...p, intereseseBNA: e.target.value }))}
-                      placeholder="Ej: 144.186,96"
-                      className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      placeholder="Ej: 192.451,91"
+                      className={`w-full px-3 py-2 border border-slate-200 rounded-lg text-sm ${calmParsed ? 'bg-slate-50 cursor-not-allowed' : ''}`}
                     />
-                    <button
-                      type="button"
-                      onClick={abrirCalculadorCABA}
-                      className="text-xs text-blue-600 hover:text-blue-800 underline mt-1 inline-block"
-                    >
-                      🔗 Abrir calculador del Consejo de la Magistratura CABA
-                    </button>
+                    {!calmParsed && (
+                      <button
+                        type="button"
+                        onClick={abrirCalculadorCABA}
+                        className="text-xs text-blue-600 hover:text-blue-800 underline mt-1 inline-block"
+                      >
+                        🔗 Abrir calculador del Consejo de la Magistratura CABA
+                      </button>
+                    )}
                   </div>
                 </div>
               </div>
 
-              {/* HONORARIOS */}
+              {/* HONORARIOS — sin cambios */}
               <div className="bg-white rounded-xl border border-slate-200 p-5">
                 <h3 className="font-medium text-slate-800 mb-1">Honorarios</h3>
-                <p className="text-xs text-slate-400 mb-4">Si los deja en blanco quedarán como [A COMPLETAR].</p>
+                <p className="text-xs text-slate-400 mb-4">Si los dejás en blanco quedan como [A COMPLETAR].</p>
                 <div className="grid grid-cols-2 gap-4">
                   <div>
                     <label className="block text-xs font-medium text-slate-600 mb-1">Letrado/a actor/a</label>
                     <input value={honorarios.actorNombre} onChange={e => setHonorarios(p => ({...p, actorNombre: e.target.value}))}
                       placeholder="Nombre del letrado"
-                      className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm mb-2 focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                      className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm mb-2" />
                     <input value={honorarios.actor} onChange={e => setHonorarios(p => ({...p, actor: e.target.value}))}
                       placeholder="$ 0.000.000"
-                      className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                      className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm" />
                   </div>
                   <div>
                     <label className="block text-xs font-medium text-slate-600 mb-1">Letrado/a demandada</label>
                     <input value={honorarios.demNombre} onChange={e => setHonorarios(p => ({...p, demNombre: e.target.value}))}
                       placeholder="Nombre del letrado"
-                      className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm mb-2 focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                      className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm mb-2" />
                     <input value={honorarios.dem} onChange={e => setHonorarios(p => ({...p, dem: e.target.value}))}
                       placeholder="$ 0.000.000"
-                      className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                      className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm" />
                   </div>
                   <div>
                     <label className="block text-xs font-medium text-slate-600 mb-1">Perito médico</label>
                     <input value={honorarios.perito} onChange={e => setHonorarios(p => ({...p, perito: e.target.value}))}
                       placeholder="$ 0.000.000"
-                      className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                      className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm" />
                   </div>
                   <div>
                     <label className="flex items-center gap-2 text-xs font-medium text-slate-600 mb-1 cursor-pointer">
@@ -810,7 +877,7 @@ export default function NewSentence({ profile, session }) {
                     {honorarios.tienePeritoPsi && (
                       <input value={honorarios.peritoPs} onChange={e => setHonorarios(p => ({...p, peritoPs: e.target.value}))}
                         placeholder="$ 0.000.000"
-                        className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                        className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm" />
                     )}
                   </div>
                 </div>
@@ -823,29 +890,21 @@ export default function NewSentence({ profile, session }) {
                 ← Volver
               </button>
               <button
-                disabled={(!ripteManual && !ripteAuto.valor) || !camposCalculoOK}
+                disabled={(!ripteManual && !ripteAuto.valor && !calmParsed) || !camposCalculoOK}
                 onClick={generate}
                 className="px-8 py-3 bg-blue-900 text-white rounded-xl font-semibold text-sm hover:bg-blue-800 transition-colors disabled:opacity-40 disabled:cursor-not-allowed shadow-md"
               >
                 ✍️ GENERAR PROYECTO DE SENTENCIA
               </button>
             </div>
-            {!camposCalculoOK && (
-              <p className="text-xs text-amber-600 mt-2 text-right">
-                ⚠ Faltan completar campos del cálculo de indemnización.
-              </p>
-            )}
           </div>
         )}
 
-        {/* ═══ PASO 2 — GENERACIÓN ════════════════════════════════════════════ */}
         {step === 2 && (
           <div>
             <div className="mb-6">
               <h2 className="text-xl font-semibold text-slate-800">Generando proyecto de sentencia</h2>
-              <p className="text-slate-500 text-sm mt-1">
-                Leyendo el PDF localmente y enviando solo las secciones relevantes a la IA. Esto tarda 2-4 minutos.
-              </p>
+              <p className="text-slate-500 text-sm mt-1">2-4 minutos aproximadamente.</p>
             </div>
 
             {genError ? (
@@ -870,31 +929,6 @@ export default function NewSentence({ profile, session }) {
                     <div className="h-full bg-blue-900 rounded-full transition-all duration-500"
                       style={{ width: `${genProgress}%` }} />
                   </div>
-
-                  {genStep === 0 && genSubProgress > 0 && (
-                    <div className="mt-3">
-                      <div className="flex items-center justify-between mb-1">
-                        <span className="text-xs text-slate-500">Leyendo páginas del PDF...</span>
-                        <span className="text-xs text-slate-400">{genSubProgress}%</span>
-                      </div>
-                      <div className="h-1 bg-slate-100 rounded-full overflow-hidden">
-                        <div className="h-full bg-blue-400 rounded-full transition-all duration-300"
-                          style={{ width: `${genSubProgress}%` }} />
-                      </div>
-                    </div>
-                  )}
-
-                  <div className="mt-4 grid grid-cols-5 gap-2">
-                    {GEN_STEPS.slice(0, 10).map((s, i) => (
-                      <div key={i} className={`text-xs px-2 py-1.5 rounded text-center ${
-                        genStep > i ? 'bg-green-100 text-green-700' :
-                        genStep === i ? 'bg-blue-100 text-blue-700 font-medium' :
-                        'bg-slate-100 text-slate-400'
-                      }`}>
-                        {genStep > i ? '✓' : (i + 1)}
-                      </div>
-                    ))}
-                  </div>
                 </div>
 
                 {sentenceText && (
@@ -903,7 +937,7 @@ export default function NewSentence({ profile, session }) {
                       <span className="w-2 h-2 bg-blue-500 rounded-full animate-pulse"></span>
                       <span className="text-sm font-medium text-slate-600">Vista previa en tiempo real</span>
                     </div>
-                    <div className="sentence-preview max-h-80 overflow-y-auto text-xs bg-slate-50 p-4 rounded-lg whitespace-pre-wrap">
+                    <div className="max-h-80 overflow-y-auto text-xs bg-slate-50 p-4 rounded-lg whitespace-pre-wrap">
                       {sentenceText.slice(-2500)}
                     </div>
                   </div>
@@ -913,26 +947,20 @@ export default function NewSentence({ profile, session }) {
           </div>
         )}
 
-        {/* ═══ PASO 3 — RESULTADO ═════════════════════════════════════════════ */}
         {step === 3 && (
           <div>
-            <div className="mb-6 flex items-start justify-between">
-              <div>
-                <h2 className="text-xl font-semibold text-slate-800">✅ Proyecto generado exitosamente</h2>
-                <p className="text-slate-500 text-sm mt-1">
-                  Revise el contenido. Los campos [COMPLETAR] requieren verificación manual.
-                </p>
-              </div>
+            <div className="mb-6">
+              <h2 className="text-xl font-semibold text-slate-800">✅ Proyecto generado</h2>
             </div>
 
             {extractedData && !extractedData._parseError && (
               <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 mb-4 grid grid-cols-2 gap-3 text-sm">
-                <div><span className="font-medium text-blue-800">Causa:</span> <span className="text-blue-700">{extractedData.causa_numero}</span></div>
-                <div><span className="font-medium text-blue-800">Actor/a:</span> <span className="text-blue-700">{extractedData.actor?.nombre}</span></div>
+                <div><span className="font-medium text-blue-800">Causa:</span> <span className="text-blue-700">{extractedData.causa_numero || '—'}</span></div>
+                <div><span className="font-medium text-blue-800">Actor/a:</span> <span className="text-blue-700">{extractedData.actor?.nombre || '—'}</span></div>
                 <div><span className="font-medium text-blue-800">Demandada:</span> <span className="text-blue-700">{Array.isArray(extractedData.demandada) ? extractedData.demandada[0]?.nombre : extractedData.demandada?.nombre}</span></div>
-                <div><span className="font-medium text-blue-800">Tipo:</span> <span className="text-blue-700">{extractedData.tipo_accion || extractedData.tipo_accion_detectado || 'No detectado'}</span></div>
+                <div><span className="font-medium text-blue-800">Tipo:</span> <span className="text-blue-700">{extractedData.tipo_accion_detectado || 'No detectado'}</span></div>
                 <div><span className="font-medium text-blue-800">Incapacidad:</span> <span className="text-blue-700">{extractedData.pericia_medica?.incapacidad_total_perito}% T.O.</span></div>
-                <div><span className="font-medium text-blue-800">Orden:</span> <span className="text-blue-700">{OPCIONES_VOTO[opcionVoto].label}</span></div>
+                <div><span className="font-medium text-blue-800">Fuente cálculos:</span> <span className="text-blue-700">{calmParsed ? 'Planilla CALM 📊' : 'Form manual'}</span></div>
               </div>
             )}
 
@@ -942,12 +970,12 @@ export default function NewSentence({ profile, session }) {
                 📥 Descargar Word (.docx)
               </button>
               <button onClick={() => navigator.clipboard.writeText(sentenceText)}
-                className="flex items-center gap-2 px-4 py-3 border border-slate-200 rounded-xl text-sm text-slate-600 hover:bg-slate-50">
+                className="px-4 py-3 border border-slate-200 rounded-xl text-sm text-slate-600 hover:bg-slate-50">
                 📋 Copiar texto
               </button>
               <button onClick={() => navigate('/')}
                 className="px-4 py-3 border border-slate-200 rounded-xl text-sm text-slate-500 hover:bg-slate-50 ml-auto">
-                Volver al inicio
+                Volver
               </button>
             </div>
 
@@ -956,7 +984,7 @@ export default function NewSentence({ profile, session }) {
                 <span className="text-sm font-medium text-slate-600">Proyecto de sentencia</span>
                 <span className="text-xs text-slate-400">{sentenceText.split(' ').length} palabras</span>
               </div>
-              <div className="sentence-preview p-6 max-h-[600px] overflow-y-auto whitespace-pre-wrap text-sm">
+              <div className="p-6 max-h-[600px] overflow-y-auto whitespace-pre-wrap text-sm">
                 {sentenceText}
               </div>
             </div>
