@@ -239,8 +239,79 @@ El porcentaje de incapacidad para la condena es UNO SOLO: el de "Porcentaje de i
 // =============================================================================
 
 export function buildExtractUserPrompt(chunks) {
-  return `Del siguiente texto de inicio de un expediente JUDICIAL DIGITAL (MEV) del Tribunal del Trabajo N° 5 de Quilmes, extraé exactamente estos datos. Respondé SOLO el JSON, sin texto adicional ni bloques de markdown:
-
+  const fullText = chunks.fullText || '';
+  let cuerpoExpediente;
+ 
+  if (fullText && fullText.length > 0) {
+    // Estrategia full-text: tres tramos del expediente completo, etiquetados.
+    const tramos = [];
+ 
+    // TRAMO 1: arranque del expediente (demanda + contestación + lo que venga)
+    tramos.push(
+      `=== TRAMO 1 — INICIO DEL EXPEDIENTE (demanda y contestación de demanda) ===\n` +
+      fullText.slice(0, 30000)
+    );
+ 
+    // TRAMO 2: dictamen pericial. Prefiero chunks.pericia (si existe) porque
+    // está ya identificado por buildChunks; si no, tomo el tramo del medio.
+    if (chunks.pericia && chunks.pericia.length > 200) {
+      tramos.push(
+        `=== TRAMO 2 — DICTAMEN PERICIAL MÉDICO ===\n` +
+        chunks.pericia.slice(0, 8000)
+      );
+    } else if (fullText.length > 30000) {
+      tramos.push(
+        `=== TRAMO 2 — TRAMO MEDIO DEL EXPEDIENTE (probable dictamen pericial) ===\n` +
+        fullText.slice(30000, Math.min(50000, fullText.length))
+      );
+    }
+ 
+    // TRAMO 3: final del expediente (impugnaciones, alegatos, autos)
+    if (chunks.final && chunks.final.length > 200) {
+      tramos.push(
+        `=== TRAMO 3 — FINAL DEL EXPEDIENTE (impugnaciones, escritos posteriores) ===\n` +
+        chunks.final.slice(0, 5000)
+      );
+    } else if (fullText.length > 50000) {
+      tramos.push(
+        `=== TRAMO 3 — FINAL DEL EXPEDIENTE ===\n` +
+        fullText.slice(-6000)
+      );
+    }
+ 
+    cuerpoExpediente = tramos.join('\n\n');
+  } else {
+    // Fallback sin fullText: combinar chunks individuales con slicing amplio
+    const tramos = [];
+    if (chunks.header) {
+      tramos.push(
+        `=== TRAMO 1 — INICIO DEL EXPEDIENTE ===\n` +
+        chunks.header.slice(0, 16000)
+      );
+      if (chunks.header.length > 16000) {
+        tramos.push(
+          `=== TRAMO 2 — CONTINUACIÓN DEL EXPEDIENTE (probable contestación) ===\n` +
+          chunks.header.slice(16000, 28000)
+        );
+      }
+    }
+    if (chunks.pericia) {
+      tramos.push(
+        `=== TRAMO 3 — DICTAMEN PERICIAL MÉDICO ===\n` +
+        chunks.pericia.slice(0, 8000)
+      );
+    }
+    if (chunks.final) {
+      tramos.push(
+        `=== TRAMO 4 — FINAL DEL EXPEDIENTE ===\n` +
+        chunks.final.slice(0, 4000)
+      );
+    }
+    cuerpoExpediente = tramos.join('\n\n');
+  }
+ 
+  return `Del siguiente texto de un expediente JUDICIAL DIGITAL (MEV) del Tribunal del Trabajo N° 5 de Quilmes, extraé exactamente estos datos. Respondé SOLO el JSON, sin texto adicional ni bloques de markdown:
+ 
 {
   "causa_numero": "",
   "caratula": "",
@@ -252,6 +323,8 @@ export function buildExtractUserPrompt(chunks) {
   "empleador": { "nombre": "", "cuit": "", "domicilio": "" },
   "letrado_actor": { "nombre": "", "tomo": "", "folio": "", "colegio": "" },
   "letrado_demandada": [{ "nombre": "", "tomo": "", "folio": "", "colegio": "" }],
+  "fecha_contestacion_demanda": "",
+  "postura_demandada_resumen": "",
   "accidente": {
     "fecha": "",
     "descripcion_detallada": "",
@@ -283,6 +356,7 @@ export function buildExtractUserPrompt(chunks) {
     "perito_matricula": "",
     "fecha_dictamen": ""
   },
+  "impugnaciones_pericia": [{ "fecha": "", "impugnante": "", "fecha_contestacion_perito": "" }],
   "pericia_psiquiatrica": {
     "tiene": false,
     "perito_nombre": "",
@@ -299,56 +373,73 @@ export function buildExtractUserPrompt(chunks) {
   "salario_denunciado": null,
   "fecha_ingreso": ""
 }
-
+ 
+# DÓNDE BUSCAR CADA DATO (encabezados MEV característicos)
+ 
+Cada presentación del expediente arranca con un encabezado MEV con esta forma:
+ 
+    Trámite: [TIPO DE PRESENTACIÓN]
+    Fecha del Escrito: DD/MM/AAAA HH:MM:SS
+    Firmado por: APELLIDO Nombre (CUIT) - [Matricula: TOMO FOLIO]
+ 
+Buscá específicamente:
+ 
+- "Trámite: DEMANDA - SE PRESENTA" → letrado_actor + fecha de demanda. El nombre con su matrícula ("Tº [Romano] Fº [N]") aparece dentro del cuerpo del escrito en el primer párrafo. Colegio: "C.A.L.Z" → CALZ; "C.A.S.I." → CASI; "C.A.Q." → CAQ; "C.A.M." → CAM; "C.A.L.P." → CALP.
+ 
+- "Trámite: DEMANDA - CONTESTA" → letrado_demandada[0].nombre/tomo/folio/colegio + fecha_contestacion_demanda. El nombre y matrícula aparecen en el primer párrafo de la contestación. La postura de la demandada (síntesis breve de 1-2 oraciones: niega hechos, alega preexistencias, defiende constitucionalidad de LRT, rechaza RIPTE, etc.) va en postura_demandada_resumen.
+ 
+- "Trámite: DICTAMEN PERICIAL - PRESENTA" → pericia_medica.perito_nombre / perito_matricula / fecha_dictamen. El nombre aparece en el bloque "PROEMIO" o al inicio del dictamen: "Dr./Dra. [NOMBRE], matrícula profesional N° [NÚMERO]". La fecha es la "Fecha del Escrito" del encabezado MEV.
+ 
+- "Trámite: IMPUGNA DICTAMEN PERICIAL" → impugnaciones_pericia[].fecha + impugnante (típicamente "demandada"). 
+ 
+- "Trámite: PERITO - CONTESTA IMPUGNACIÓN" → impugnaciones_pericia[].fecha_contestacion_perito.
+ 
+- Dictamen de Comisión Médica (Ley 27.348): puede venir mencionado en la documental de la demanda y/o como adjunto en la contestación. Buscá frases como "Dictamen Médico Expte [N°]", "Comisión Médica N° [N°]", "Delegación [LOCALIDAD]", "Disposición de Alcance Particular de Clausura". El expediente SRT tiene formato típico "NNNNNN/AA". Si la CM dictaminó que "no presenta secuelas" o "no presenta incapacidad", poné incapacidad_cm_porcentaje = 0. Si fija un %, ponelo. resultado_cm: una frase corta tipo "Rechazo de incapacidad" o "Reconoce X% de incapacidad".
+ 
 # TIPO DE ACCIÓN (campo "tipoAccion")
-
+ 
 Elegí UNO de estos tres valores exactos:
-
+ 
 - "ACCIDENTE": hecho súbito, traumático, único (caída, golpe, atrapamiento, in itinere). Acción directa de la LRT/26.773. Ejemplo: "INICIA DEMANDA POR ACCIDENTE", "Materia: Accidente de trabajo - Acción especial".
-
+ 
 - "ENFERMEDAD": cuadro por exposición prolongada o contagio en ocasión de trabajo. COVID-19 = enfermedad profesional para esenciales (DNU 367/2020). Ejemplo: "Materia: Enfermedad profesional", "DNU 367/2020".
-
-- "REVISION_CM": el actor agotó la instancia administrativa ante una Comisión Médica y viene a juicio a REVISAR ese dictamen. Tag CRÍTICO: presencia de las frases "acción de revisión", "ley 15.057", "ley 15057", "revisión de resolución de Comisión Médica", "art. 2 inc. j ley 15.057", "revisión res. comisión médica jurisdiccional" en la carátula, sumario o cuerpo de la demanda. También suele aparecer la cita de "Disposición de Alcance Particular de Clausura del Procedimiento Administrativo ante la SRT" en la documental adjunta.
-
+ 
+- "REVISION_CM": el actor agotó la instancia administrativa ante una Comisión Médica y viene a juicio a REVISAR ese dictamen. Tag CRÍTICO: presencia de las frases "acción de revisión", "ley 15.057", "ley 15057", "revisión de resolución de Comisión Médica", "art. 2 inc. j ley 15.057", "revisión res. comisión médica jurisdiccional" en la carátula, sumario o cuerpo de la demanda.
+ 
 En "tipo_accion_detectado" copiá la frase literal del expediente. En "tipoAccion" usá uno de los tres tags de arriba.
-
+ 
 # DOS PORCENTAJES DISTINTOS — NO LOS CONFUNDAS
-
+ 
 **incapacidad_reclamada_demanda**: el porcentaje que el ACTOR reclama en la DEMANDA. Aparece típicamente en frases como "padeciendo por ello una incapacidad que se estima en un X %" o en la liquidación inicial "incapacidad laboral en un X% de la total obrera". También la "incapacidad psicológica del orden del X%". Esto es lo que el actor PIDE, no lo que el tribunal tiene por probado.
-
+ 
 **incapacidad_acreditada_pericia**: el porcentaje que el PERITO MÉDICO designado por el tribunal estableció en su dictamen pericial. Aparece en el escrito del perito con frases como "INCAPACIDAD: X% de la T.O.", "BAREMACIÓN", "factores de ponderación". Puede ser muy distinto al reclamado (típicamente menor). Esto es el HECHO PROBADO.
-
+ 
 REGLA: NUNCA copies el % reclamado al campo de acreditado por error. Son DOS NÚMEROS distintos del mismo expediente. Si la pericia no aparece en el texto que te pasaron, dejá los campos de acreditada en null.
-
+ 
 # PERICIA PSIQUIÁTRICA — ESTRICTO
-
+ 
 \`pericia_psiquiatrica.tiene\` solo es **true** si HUBO un perito psicólogo o psiquiatra DESINSACULADO Y DICTAMINANDO en autos, distinto del perito médico legista.
-
-Indicadores de que SÍ hubo perito psi:
-- Aparece un dictamen pericial firmado por un psicólogo o psiquiatra (no por el médico legista).
-- El médico legista cita en su informe "Pericia psicológica obrante en autos".
-- El expediente tiene tramos separados de "PERICIA PSICOLÓGICA" o "PERICIA PSIQUIÁTRICA" distintos del médico.
-
+ 
 NO indican que haya perito psi:
 - La demanda reclama daño psicológico (el actor lo pide, pero eso no implica que un perito lo haya dictaminado).
 - La demandada se opone a la designación de perito psi (esto es OPOSICIÓN, no hubo perito).
 - El médico legista realiza un examen psíquico básico dentro de su propio dictamen y descarta patología (eso es el legista, NO un perito psi separado).
-
+ 
 Si solo intervino el médico legista (aunque haya evaluado lo psíquico), \`pericia_psiquiatrica.tiene\` = **false**.
-
+ 
 # REGLAS GENERALES DE EXTRACCIÓN
-
+ 
 - LETRADO: tomo (ej "XVI") y folio (ej "42") POR SEPARADO. Colegio: "CAM" (Morón), "CAQ" (Quilmes), "CALP" (La Plata), "CALZ" (Lomas de Zamora), "CASI" (San Isidro).
 - CARÁTULA: en MEV suele venir en el SUMARIO/Observación, formato "ACTOR C/ DEMANDADO S/ MATERIA".
 - denuncia_inconst_ley_23928: true si el actor planteó inconstitucionalidad del art. 7 ley 23.928 o pidió actualización invocando "Barrios".
 - ibm_bruto_afip: si el texto contiene un IBM ya calculado, ponelo; sino null.
 - preexistencias_denunciadas: array de objetos {expte, fecha_atep, porcentaje, region_corporal} si la demandada denuncia preexistencias. Sino array vacío.
-- Para valores no encontrados: null (o false/0/"" según el tipo). NO inventes.
+- Para valores no encontrados en NINGUNO de los tramos: null (o false/0/"" según el tipo). NO inventes.
 - Respondé SOLO el JSON, sin texto previo ni posterior.
-
+ 
 TEXTO DEL EXPEDIENTE:
-
-${chunks.header.slice(0, 16000)}`;
+ 
+${cuerpoExpediente}`;
 }
 
 // =============================================================================
