@@ -19,6 +19,8 @@
 //   const { meta, salarios, totales, calculos } = result
 // =============================================================================
 
+import { numeroALetras } from './numeroALetras'
+
 // SheetJS (XLSX global) ya se carga en claude.js cuando hay un .xlsx adjunto.
 // Acá lo importamos por si se usa standalone, pero si XLSX ya está en window,
 // reutilizamos la global para no duplicar la librería.
@@ -266,6 +268,7 @@ export function adaptToCalculos(parsed, esAccidente) {
     hipotesisB,
     adicional20,
     total,
+    totalEnLetras: numeroALetras(total, { conPesos: true }),
     esAccidente,
     edad: meta.edad,
     porcentaje: meta.porcentajeIncapacidadPct,
