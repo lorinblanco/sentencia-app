@@ -255,6 +255,7 @@ export default function NewSentence({ profile, session }) {
     try {
       const { fullText } = await extractAllText(expedientePDF.file)
       const chunks = buildChunks(fullText, [])
+      chunks.fullText = fullText  // ← el extractor lee el expediente completo, no solo header
       setCachedChunks(chunks)
 
       const data = await extractBasicInfo(apiKey, chunks)
@@ -275,8 +276,9 @@ export default function NewSentence({ profile, session }) {
           updates.edadActor = String(data.actor.edad_al_accidente)
           prefilled.edadActor = true
         }
-        if (data.pericia_medica?.incapacidad_total_perito) {
-          updates.porcentajeIncapacidad = String(data.pericia_medica.incapacidad_total_perito).replace('.', ',')
+        const pctPericia = data.incapacidad_acreditada_pericia?.total_porcentaje
+        if (pctPericia != null) {
+          updates.porcentajeIncapacidad = String(pctPericia).replace('.', ',')
           prefilled.porcentajeIncapacidad = true
         }
         if (data.ibm_bruto_afip) {
@@ -381,6 +383,7 @@ export default function NewSentence({ profile, session }) {
           }
         }
         chunks = buildChunks(fullText, extraTexts)
+        chunks.fullText = fullText  // ← el extractor lee el expediente completo, no solo header
       }
 
       // === Detección de planilla CALM ===
@@ -979,7 +982,7 @@ export default function NewSentence({ profile, session }) {
                 <div><span className="font-medium text-blue-800">Actor/a:</span> <span className="text-blue-700">{extractedData.actor?.nombre || '—'}</span></div>
                 <div><span className="font-medium text-blue-800">Demandada:</span> <span className="text-blue-700">{Array.isArray(extractedData.demandada) ? extractedData.demandada[0]?.nombre : extractedData.demandada?.nombre}</span></div>
                 <div><span className="font-medium text-blue-800">Tipo:</span> <span className="text-blue-700">{extractedData.tipo_accion_detectado || 'No detectado'}</span></div>
-                <div><span className="font-medium text-blue-800">Incapacidad:</span> <span className="text-blue-700">{extractedData.pericia_medica?.incapacidad_total_perito}% T.O.</span></div>
+                <div><span className="font-medium text-blue-800">Incapacidad acreditada:</span> <span className="text-blue-700">{extractedData.incapacidad_acreditada_pericia?.total_porcentaje ?? '—'}% T.O.</span></div>
                 <div><span className="font-medium text-blue-800">Fuente cálculos:</span> <span className="text-blue-700">{calmParsed ? 'Planilla CALM 📊' : 'Form manual'}</span></div>
               </div>
             )}
