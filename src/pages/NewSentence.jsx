@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import {
   extractAllText, buildChunks, extractBasicInfo, generateSection,
   extractExtraFileText, buildCalculos,
-  tryParsePlanillaCALM, detectarEsEnfermedad,
+  tryParsePlanillaCALM, detectarTipoAccion, validarTextoSentencia,
 } from '../lib/claude'
 import {
   buildAdhesionPrimera, buildAdhesionSegunda, detectarVarianteWeiss
@@ -122,6 +122,7 @@ export default function NewSentence({ profile, session }) {
   const [genSubProgress, setGenSubProgress] = useState(0)
   const [genError, setGenError] = useState('')
   const [extractedData, setExtractedData] = useState(null)
+  const [validationFindings, setValidationFindings] = useState([])
   const [sentenceText, setSentenceText] = useState('')
   const [savedId, setSavedId] = useState(null)
 
@@ -399,72 +400,79 @@ export default function NewSentence({ profile, session }) {
         setExtractedData(data)
       }
 
-      // === Detección dual de enfermedad profesional ===
-      const esEnfermedad = detectarEsEnfermedad(chunks, data)
-      console.log(`🩺 Tipo detectado: ${esEnfermedad ? 'ENFERMEDAD PROFESIONAL' : 'ACCIDENTE DE TRABAJO'}`)
-
-      // Forzar el tipo en data para que los prompts lo respeten
-      if (esEnfermedad) {
-        data.tipo_accion_detectado = data.tipo_accion_detectado || 'Enfermedad profesional - Acción especial'
-      } else if (!data.tipo_accion_detectado) {
-        data.tipo_accion_detectado = 'Acción especial - Ley 24.557'
+            // === Detección de tipo de acción (3 valores) ===
+      const tipoAccion = detectarTipoAccion(chunks, data)
+      console.log(`🩺 Tipo detectado: ${tipoAccion}`)
+ 
+      // Inyectar el tipo en data para que los prompts lo respeten
+      data.tipoAccion = tipoAccion
+      if (!data.tipo_accion_detectado) {
+        data.tipo_accion_detectado =
+          tipoAccion === 'ENFERMEDAD' ? 'Enfermedad profesional - Acción especial'
+          : tipoAccion === 'REVISION_CM' ? 'Revisión resolución CM - Art. 2 inc. J ley 15.057'
+          : 'Acción especial - Ley 24.557'
       }
-
+ 
       // === Construcción de cálculos (planilla CALM tiene prioridad) ===
-      const calculos = buildCalculos(config, data, calmParsed, esEnfermedad)
+      const calculos = buildCalculos(config, data, calmParsed, tipoAccion)
       console.log('Cálculos:', calculos)
       console.log('Variante Weiss:', detectarVarianteWeiss(calculos, data))
-
+ 
       const encabezado = buildEncabezado(data, config)
       let fullSentence = encabezado + '\n\n'
       fullSentence += 'El Tribunal resolvió plantear y votar las siguientes cuestiones:\n\n'
       fullSentence += `PRIMERA CUESTIÓN: ¿Cuáles son los hechos que arriban firmes a esta instancia y cuáles los controvertidos?\n\n`
       fullSentence += `A LA PRIMERA CUESTIÓN PLANTEADA ${voto.juez1.nombreCompleto} DIJO:\n\n`
       setSentenceText(fullSentence)
-
-      // Helper: callback de streaming que actualiza la vista previa en vivo.
-// Cierra sobre fullSentence; cada pedazo se concatena al texto acumulado.
-const streamUpdate = (piece, soFar) => {
-  setSentenceText(fullSentence + soFar)
-}
-
-setGenStep(4); setGenProgress(45)
-const antecedentes = await generateSection(
-  apiKey, 'antecedentes', chunks, data, config, calculos, streamUpdate
-)
-fullSentence += antecedentes + '\n\n'
-setSentenceText(fullSentence)
-
-setGenStep(5); setGenProgress(60)
-const resolucion = await generateSection(
-  apiKey, 'resolucion', chunks, data, config, calculos, streamUpdate
-)
-fullSentence += resolucion + '\n\n'
-setSentenceText(fullSentence)
-
-setGenStep(6); setGenProgress(72)
-const ibm = await generateSection(
-  apiKey, 'ibm', chunks, data, config, calculos, streamUpdate
-)
-fullSentence += ibm + '\n\n'
-fullSentence += buildAdhesionPrimera(config) + '\n\n'
-fullSentence += `SEGUNDA CUESTIÓN: ¿Qué pronunciamiento corresponde dictar?\n\n`
-fullSentence += `A LA SEGUNDA CUESTIÓN PLANTEADA ${voto.juez1.nombreCompleto} DIJO:\n\n`
-setSentenceText(fullSentence)
-
-setGenStep(7); setGenProgress(85)
-const segunda = await generateSection(
-  apiKey, 'segunda', chunks, data, config, calculos, streamUpdate
-)
-fullSentence += segunda + '\n\n'
-fullSentence += buildAdhesionSegunda(config, calculos, data) + '\n\n'
-setSentenceText(fullSentence)
-
-setGenStep(8); setGenProgress(93)
-const dispositivo = await generateSection(
-  apiKey, 'sentencia', chunks, data, config, calculos, streamUpdate
-)
-
+ 
+      // Callbacks: streaming (vista previa en vivo) y validación post-sección
+      const allFindings = []
+      const streamUpdate = (piece, soFar) => { setSentenceText(fullSentence + soFar) }
+      const onValidation = ({ sectionType, findings }) => {
+        if (findings.length > 0) {
+          allFindings.push(...findings.map(f => ({ ...f, sectionType })))
+        }
+      }
+ 
+      setGenStep(4); setGenProgress(45)
+      const antecedentes = await generateSection(
+        apiKey, 'antecedentes', chunks, data, config, calculos, streamUpdate, onValidation
+      )
+      fullSentence += antecedentes + '\n\n'
+      setSentenceText(fullSentence)
+ 
+      setGenStep(5); setGenProgress(60)
+      const resolucion = await generateSection(
+        apiKey, 'resolucion', chunks, data, config, calculos, streamUpdate, onValidation
+      )
+      fullSentence += resolucion + '\n\n'
+      setSentenceText(fullSentence)
+ 
+      setGenStep(6); setGenProgress(72)
+      const ibm = await generateSection(
+        apiKey, 'ibm', chunks, data, config, calculos, streamUpdate, onValidation
+      )
+      fullSentence += ibm + '\n\n'
+      fullSentence += buildAdhesionPrimera(config) + '\n\n'
+      fullSentence += `SEGUNDA CUESTIÓN: ¿Qué pronunciamiento corresponde dictar?\n\n`
+      fullSentence += `A LA SEGUNDA CUESTIÓN PLANTEADA ${voto.juez1.nombreCompleto} DIJO:\n\n`
+      setSentenceText(fullSentence)
+ 
+      setGenStep(7); setGenProgress(85)
+      const segunda = await generateSection(
+        apiKey, 'segunda', chunks, data, config, calculos, streamUpdate, onValidation
+      )
+      fullSentence += segunda + '\n\n'
+      fullSentence += buildAdhesionSegunda(config, calculos, data) + '\n\n'
+      setSentenceText(fullSentence)
+ 
+      setGenStep(8); setGenProgress(93)
+      const dispositivo = await generateSection(
+        apiKey, 'sentencia', chunks, data, config, calculos, streamUpdate, onValidation
+      )
+ 
+      // Guardar findings del validador para mostrarlos en la UI
+      setValidationFindings(allFindings)
       setGenStep(9); setGenProgress(98)
       const meta = {
         causa_numero: data.causa_numero || '',
