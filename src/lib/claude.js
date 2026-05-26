@@ -1,16 +1,18 @@
 // src/lib/claude.js
 // =============================================================================
-// SentencIA - Claude API client v9 (streaming SSE)
+// SentencIA - Claude API client v10
 // =============================================================================
-// Cambios v8 → v9:
-//   - callClaude() ahora acepta un callback opcional `onChunk`. Si se pasa,
-//     hace streaming SSE: pide stream:true al proxy, parsea eventos
-//     content_block_delta y va llamando al callback con cada pedazo de texto.
-//   - generateSection() expone onChunk para que la UI pueda mostrar tokens
-//     en tiempo real.
-//   - extractBasicInfo() sigue NO usando streaming (necesita el JSON completo).
-//   - Bajamos max_tokens de segunda/sentencia de 6000 a 4800 (margen de
-//     seguridad sobre el timeout, aunque streaming ya lo neutraliza).
+// Cambios v9 → v10:
+//   1. detectarTipoAccion() reemplaza detectarEsEnfermedad(). Devuelve uno de
+//      tres valores: 'ACCIDENTE' | 'ENFERMEDAD' | 'REVISION_CM'.
+//      detectarEsEnfermedad() se mantiene como wrapper deprecated por compat.
+//   2. validarTextoSentencia() escanea el texto generado en busca de frases
+//      de fabricación ("si bien no surge...", "se desprende que...", etc.) y
+//      devuelve la lista de hallazgos para mostrar al juez antes del DOCX.
+//   3. generateSection() corre el validador automáticamente y adjunta los
+//      hallazgos al callback opcional onValidation.
+//   4. buildCalculos() recibe el tipoAccion (string) en lugar del flag
+//      booleano esEnfermedad.
 // =============================================================================
 
 import {
@@ -28,7 +30,7 @@ import { numeroALetras, fmtMontoAR } from './numeroALetras'
 import { parseCalculadorCALM, adaptToCalculos, esPlanillaCALM } from './parseCalculador'
 
 // =============================================================================
-// PDF.js loader (sin cambios)
+// PDF.js loader
 // =============================================================================
 
 async function loadPdfjs() {
@@ -72,7 +74,7 @@ export async function extractAllText(file, onProgress) {
 }
 
 // =============================================================================
-// CHUNKING (sin cambios)
+// CHUNKING — chunk de pericia ampliado a 28k para capturar el dictamen completo
 // =============================================================================
 
 export function buildChunks(fullText, extraTexts = []) {
@@ -96,6 +98,13 @@ export function buildChunks(fullText, extraTexts = []) {
   const header = fullText.slice(0, Math.min(25000, Math.floor(len * 0.15)))
 
   let periIdx = find([
+    'dictamen pericial - presenta',
+    'perito médico presenta',
+    'dictamen pericial',
+    'i- proemio', 'i.- proemio',
+    'antecedentes de interés médico',
+    'examen médico-pericial', 'examen medico pericial',
+    'valoracion del daño corporal', 'valoración del daño corporal',
     'flexion disminuida', 'flexión disminuida',
     'movimientos de flexion', 'movimientos de flexión',
     'portal artroscopico', 'portal artroscópico',
@@ -105,20 +114,20 @@ export function buildChunks(fullText, extraTexts = []) {
     'tinel positivo', 'tinel negativo',
     'phalen positivo', 'phalen negativo',
     'escala de beck', 'escala de hamilton',
-    'hamilton:', 'beck:',
-    'examen pericial', 'examen fisico pericial',
+    'examen pericial',
     'practico el examen', 'practicó el examen',
+    'baremación', 'baremacion',
+    'incapacidad parcial y permanente del',
+    't.o. por',
   ])
   if (periIdx < 0) periIdx = find([
     'dictamino', 'dictaminó',
     'perito medico designado', 'el galeno determino',
     'segun el baremo', 'conforme el baremo',
-    'incapacidad parcial y permanente del',
-    't.o. por',
   ])
   const pericia = periIdx > 0
-    ? slice(periIdx - 3000, 22000)
-    : fullText.slice(Math.floor(len * 0.40), Math.floor(len * 0.40) + 22000)
+    ? slice(periIdx - 3000, 28000)
+    : fullText.slice(Math.floor(len * 0.40), Math.floor(len * 0.40) + 28000)
 
   let afipIdx = find([
     'vib (ripte)', 'v.i.b. (ripte)',
@@ -155,7 +164,7 @@ export function buildChunks(fullText, extraTexts = []) {
 }
 
 // =============================================================================
-// PLANILLA CALM — detección y parsing
+// PLANILLA CALM
 // =============================================================================
 
 export async function tryParsePlanillaCALM(file) {
@@ -170,49 +179,148 @@ export async function tryParsePlanillaCALM(file) {
 }
 
 // =============================================================================
-// DETECCIÓN DUAL: ¿es enfermedad profesional?
-// =============================================================================
-
-export function detectarEsEnfermedad(chunks, datos) {
-  const tipoLLM = (
-    datos?.tipo_accion_detectado || datos?.tipo_accion || ''
-  ).toUpperCase()
-
-  if (tipoLLM.includes('ENFERMEDAD')) return true
-  if (tipoLLM.includes('ACCIDENTE')) return false
-
-  const headerLower = (chunks?.header || '').toLowerCase()
-  const indicadoresEnfermedad = [
-    's/ enfermedad profesional',
-    'materia: inicio demanda laboral por enfermedad profesional',
-    'enfermedad profesional',
-    'covid-19',
-    'covid 19',
-    'dnu 367/2020',
-    'dnu 367/20',
-    'decreto 367/2020',
-    'presunción de enfermedad profesional',
-  ]
-  if (indicadoresEnfermedad.some(kw => headerLower.includes(kw))) return true
-
-  return false
-}
-
-// =============================================================================
-// CALL CLAUDE — con soporte de streaming SSE
+// DETECCIÓN DE TIPO DE ACCIÓN (3 valores)
 // =============================================================================
 
 /**
- * Llama al proxy /api/generate.
- *
- * @param {string} apiKey
- * @param {string} userPrompt
- * @param {number} maxTokens
- * @param {(piece:string, soFar:string) => void} [onChunk]
- *   Si se pasa, activa streaming. Se invoca con cada pedazo de texto y el
- *   acumulado hasta el momento. Si no se pasa, espera la respuesta completa.
- * @returns {Promise<string>} texto completo
+ * Devuelve 'ACCIDENTE' | 'ENFERMEDAD' | 'REVISION_CM' analizando keywords
+ * del header + el JSON del extract.
  */
+export function detectarTipoAccion(chunks, datos) {
+  const tag = (datos?.tipoAccion || '').toUpperCase()
+  if (tag === 'ACCIDENTE' || tag === 'ENFERMEDAD' || tag === 'REVISION_CM') {
+    return tag
+  }
+
+  const headerLower = (chunks?.header || '').toLowerCase()
+  const tipoLLM = (datos?.tipo_accion_detectado || datos?.tipo_accion || '').toLowerCase()
+
+  // Prioridad: REVISIÓN CM Ley 15.057 (mirar primero — puede convivir con
+  // keywords de accidente o enfermedad)
+  const indicadoresRevision = [
+    'acción de revisión',
+    'accion de revision',
+    'revisión de resolución de comisión médica',
+    'revision de resolucion de comision medica',
+    'revisión res. comisión médica',
+    'revision res. comision medica',
+    'ley 15.057',
+    'ley 15057',
+    'art. 2 inc. j',
+    'art 2 inc j',
+    'inc. j ley 15.057',
+    'disposición de alcance particular',
+    'disposicion de alcance particular',
+  ]
+  if (
+    indicadoresRevision.some(kw => headerLower.includes(kw)) ||
+    tipoLLM.includes('revisi')
+  ) {
+    return 'REVISION_CM'
+  }
+
+  // ENFERMEDAD
+  if (tipoLLM.includes('enfermedad')) return 'ENFERMEDAD'
+  const indicadoresEnf = [
+    's/ enfermedad profesional',
+    'inicio demanda laboral por enfermedad profesional',
+    'covid-19', 'covid 19',
+    'dnu 367/2020', 'dnu 367/20',
+    'decreto 367/2020',
+    'presunción de enfermedad profesional',
+  ]
+  if (indicadoresEnf.some(kw => headerLower.includes(kw))) return 'ENFERMEDAD'
+
+  return 'ACCIDENTE'
+}
+
+/**
+ * Wrapper deprecated: devuelve true si tipo es ENFERMEDAD.
+ * Mantenido por compatibilidad.
+ */
+export function detectarEsEnfermedad(chunks, datos) {
+  return detectarTipoAccion(chunks, datos) === 'ENFERMEDAD'
+}
+
+// =============================================================================
+// VALIDADOR DE ALUCINACIONES
+// =============================================================================
+
+const PATRONES_FABRICACION = [
+  {
+    code: 'JSON_LEAK',
+    re: /\bjson\s+extra[ií]do\b/i,
+    msg: 'El LLM menciona el "JSON extraído" — confiesa que está mirando datos crudos. Revisar pasaje.',
+  },
+  {
+    code: 'SI_BIEN_NO_SURGE',
+    re: /\bsi\s+bien\s+(no|del?)\s+[^.]{0,80}(no\s+surge|no\s+consta|no\s+figura)/i,
+    msg: 'Frase clásica de fabricación: "Si bien no surge / no consta / no figura...". El LLM admite que falta el dato y sigue adelante. Reemplazar por marcador [FALTA: ...].',
+  },
+  {
+    code: 'DESPRENDE_QUE',
+    re: /(de\s+las?\s+constancias?[^.]{0,40}se\s+desprende\s+que|se\s+desprende\s+que\s+el\s+perito)/i,
+    msg: 'Frase de fabricación: "se desprende que...". Suele preceder un dato inventado.',
+  },
+  {
+    code: 'PUEDE_INFERIRSE',
+    re: /\b(puede\s+inferirse|cabe\s+colegir|se\s+entiende\s+que|presumiblemente)\b/i,
+    msg: 'Frase de inferencia que el LLM no debería usar en una sentencia.',
+  },
+  {
+    code: 'HABRIA_DICTAMINADO',
+    re: /\b(habr[ií]a\s+dictamin|habr[ií]a\s+manifestado|seg[uú]n\s+las\s+constancias)\b/i,
+    msg: 'Condicional sospechoso. Verificar que el perito efectivamente lo dictaminó.',
+  },
+  {
+    code: 'FALTA_MARKER',
+    re: /\[FALTA:\s*[^\]]+\]/g,
+    msg: 'Marcador [FALTA: ...] pendiente. Completar manualmente con el dato real antes de firmar.',
+    isInfo: true,
+  },
+  {
+    code: 'PERITO_PSI_GENERICO',
+    re: /\bel\s+perito\s+(psicol[oó]gico|psiqui[aá]trico)\s+que\s+intervino\b/i,
+    msg: 'Mención a "perito psicológico/psiquiátrico que intervino" — verificar que ese perito REALMENTE existe (no solo un legista que evaluó lo psíquico).',
+  },
+  {
+    code: 'COMPLETAR',
+    re: /\[COMPLETAR\]/g,
+    msg: 'Placeholder "[COMPLETAR]" obsoleto — debería ser [FALTA: descripción específica].',
+  },
+]
+
+/**
+ * Escanea un texto buscando frases de fabricación.
+ * @returns {Array<{code, msg, pasaje, isInfo}>}
+ */
+export function validarTextoSentencia(texto) {
+  if (!texto) return []
+  const hallazgos = []
+  for (const p of PATRONES_FABRICACION) {
+    const flags = p.re.flags.includes('g') ? p.re.flags : p.re.flags + 'g'
+    const re = new RegExp(p.re.source, flags)
+    let m
+    while ((m = re.exec(texto)) !== null) {
+      const start = Math.max(0, m.index - 60)
+      const end = Math.min(texto.length, m.index + m[0].length + 60)
+      const pasaje = texto.slice(start, end).replace(/\s+/g, ' ')
+      hallazgos.push({
+        code: p.code,
+        msg: p.msg,
+        pasaje: (start > 0 ? '…' : '') + pasaje + (end < texto.length ? '…' : ''),
+        isInfo: !!p.isInfo,
+      })
+      if (m.index === re.lastIndex) re.lastIndex++
+    }
+  }
+  return hallazgos
+}
+
+// =============================================================================
+// CALL CLAUDE — streaming SSE
+// =============================================================================
+
 async function callClaude(apiKey, userPrompt, maxTokens = 4000, onChunk = null) {
   const useStream = typeof onChunk === 'function'
 
@@ -227,7 +335,6 @@ async function callClaude(apiKey, userPrompt, maxTokens = 4000, onChunk = null) 
     }),
   })
 
-  // ===== MODO NO-STREAMING =====
   if (!useStream) {
     const txt = await res.text()
     let data
@@ -239,17 +346,13 @@ async function callClaude(apiKey, userPrompt, maxTokens = 4000, onChunk = null) 
     return data.content[0].text
   }
 
-  // ===== MODO STREAMING =====
-  // El proxy puede devolver JSON de error si Anthropic rechaza el request
-  // antes de empezar a streamear. Detectamos por Content-Type.
+  // streaming
   const contentType = res.headers.get('content-type') || ''
   if (!res.ok || contentType.includes('application/json')) {
     const txt = await res.text()
     let data = null
     try { data = JSON.parse(txt) } catch {}
-    throw new Error(
-      data?.error?.message || data?.error || `Error HTTP ${res.status}: ${txt.slice(0, 200)}`
-    )
+    throw new Error(data?.error?.message || data?.error || `Error HTTP ${res.status}: ${txt.slice(0, 200)}`)
   }
 
   if (!res.body) throw new Error('Streaming no soportado por el navegador')
@@ -264,10 +367,8 @@ async function callClaude(apiKey, userPrompt, maxTokens = 4000, onChunk = null) 
     const { done, value } = await reader.read()
     if (done) break
     buffer += decoder.decode(value, { stream: true })
-
-    // SSE: eventos separados por línea en blanco (\n\n)
     const events = buffer.split('\n\n')
-    buffer = events.pop() // último puede estar incompleto, lo guardamos
+    buffer = events.pop()
 
     for (const ev of events) {
       if (!ev.trim()) continue
@@ -280,12 +381,8 @@ async function callClaude(apiKey, userPrompt, maxTokens = 4000, onChunk = null) 
       if (!dataLine || dataLine === '[DONE]') continue
 
       let obj
-      try { obj = JSON.parse(dataLine) }
-      catch { continue }
+      try { obj = JSON.parse(dataLine) } catch { continue }
 
-      // Anthropic envía estos eventos:
-      //   message_start, content_block_start, content_block_delta,
-      //   content_block_stop, message_delta, message_stop, error
       if (obj.type === 'content_block_delta' && obj.delta?.type === 'text_delta') {
         const piece = obj.delta.text || ''
         if (piece) {
@@ -304,7 +401,7 @@ async function callClaude(apiKey, userPrompt, maxTokens = 4000, onChunk = null) 
 }
 
 // =============================================================================
-// PRE-CÁLCULOS NUMÉRICOS (con soporte de planilla CALM)
+// PRE-CÁLCULOS con tipoAccion (3 valores)
 // =============================================================================
 
 function parseMonto(s) {
@@ -321,21 +418,42 @@ function calcIndemnizacion(ibm, edad, porcentaje) {
   return 53 * ibm * 65 / edad * (porcentaje / 100)
 }
 
-export function buildCalculos(config, datos, calmParsed = null, esEnfermedad = null) {
-  if (calmParsed && calmParsed.esValida) {
-    const esEnf = esEnfermedad != null
-      ? esEnfermedad
-      : (datos?.tipo_accion_detectado || datos?.tipo_accion || '').toUpperCase().includes('ENFERMEDAD')
+/**
+ * Construye los cálculos para la sentencia.
+ *
+ * @param {string} tipoAccion         'ACCIDENTE' | 'ENFERMEDAD' | 'REVISION_CM'
+ * @param {boolean} accidenteEnRevision  solo si tipoAccion=REVISION_CM:
+ *                                    true si el hecho denunciado es accidente.
+ */
+export function buildCalculos(
+  config, datos, calmParsed = null, tipoAccion = 'ACCIDENTE', accidenteEnRevision = true
+) {
+  // Compat hacia atrás (4to arg boolean = esEnfermedad)
+  if (tipoAccion === true) tipoAccion = 'ENFERMEDAD'
+  else if (tipoAccion === false) tipoAccion = 'ACCIDENTE'
 
-    return adaptToCalculos(calmParsed, !esEnf)
+  let esAccidente
+  if (tipoAccion === 'ACCIDENTE') esAccidente = true
+  else if (tipoAccion === 'ENFERMEDAD') esAccidente = false
+  else esAccidente = accidenteEnRevision
+
+  // RUTA 1: planilla CALM
+  if (calmParsed && calmParsed.esValida) {
+    const adapted = adaptToCalculos(calmParsed, esAccidente)
+    adapted.tipoAccion = tipoAccion
+    return adapted
   }
 
+  // RUTA 2: cálculo manual
   const ripteActual = parseMonto(config.ripte_actual)
   const ripteAccidente = parseMonto(config.ripte_accidente)
   const intereseseBNA = parseMonto(config.intereses_bna)
   const ibmBruto = parseMonto(config.ibm_bruto) || parseMonto(datos?.ibm_bruto_afip)
   const edad = config.edad_actor || datos?.actor?.edad_al_accidente
+  // CLAVE: % de incapacidad para la condena viene de la ACREDITADA (pericia),
+  // no del % reclamado en la demanda.
   const porcentaje = config.porcentaje_incapacidad
+    || datos?.incapacidad_acreditada_pericia?.total_porcentaje
     || datos?.pericia_medica?.incapacidad_total_perito
     || datos?.pericia_medica?.incapacidad_fisica_porcentaje
 
@@ -348,10 +466,6 @@ export function buildCalculos(config, datos, calmParsed = null, esEnfermedad = n
   const ibmRIPTE = ibmBruto * coefRipte
   const hipotesisB = calcIndemnizacion(ibmRIPTE, edad, porcentaje)
 
-  const esEnf = esEnfermedad != null
-    ? esEnfermedad
-    : (datos?.tipo_accion_detectado || datos?.tipo_accion || 'ACCIDENTE').toUpperCase().includes('ENFERMEDAD')
-  const esAccidente = !esEnf
   const adicional20 = esAccidente ? hipotesisB * 0.20 : 0
   const total = hipotesisB + adicional20
   const totalEnLetras = numeroALetras(total, { conPesos: true })
@@ -362,16 +476,13 @@ export function buildCalculos(config, datos, calmParsed = null, esEnfermedad = n
     ibmConIntereses: round2(ibmConIntereses),
     hipotesisA: round2(hipotesisA),
     coefRipte: parseFloat(coefRipte.toFixed(3)),
-    ripteActual,
-    ripteAccidente,
+    ripteActual, ripteAccidente,
     ibmRIPTE: round2(ibmRIPTE),
     hipotesisB: round2(hipotesisB),
     adicional20: round2(adicional20),
     total: round2(total),
     totalEnLetras,
-    esAccidente,
-    edad,
-    porcentaje,
+    esAccidente, tipoAccion, edad, porcentaje,
     fuente: 'calculo_manual',
     fmt: {
       ibmBruto: fmtMontoAR(ibmBruto),
@@ -389,12 +500,12 @@ export function buildCalculos(config, datos, calmParsed = null, esEnfermedad = n
 }
 
 // =============================================================================
-// EXTRACT (no usa streaming — necesitamos el JSON completo de una vez)
+// EXTRACT (no streaming)
 // =============================================================================
 
 export async function extractBasicInfo(apiKey, chunks) {
   const prompt = buildExtractUserPrompt(chunks)
-  const text = await callClaude(apiKey, prompt, 2500) // sin onChunk → no-streaming
+  const text = await callClaude(apiKey, prompt, 3000)
   try {
     const clean = text.replace(/```json|```/g, '').trim()
     const json = JSON.parse(clean)
@@ -407,14 +518,17 @@ export async function extractBasicInfo(apiKey, chunks) {
 }
 
 // =============================================================================
-// GENERATE SECTION — usa streaming si se pasa onChunk
+// GENERATE SECTION — streaming + validador
 // =============================================================================
 
 /**
- * @param {Function} [onChunk]  callback (piece, soFar) para streaming
+ * @param {Function} [onChunk]      callback de streaming (piece, soFar)
+ * @param {Function} [onValidation] callback con hallazgos del validador,
+ *                                  invocado al final con { sectionType, findings }
  */
 export async function generateSection(
-  apiKey, sectionType, chunks, data, config, calculos = null, onChunk = null
+  apiKey, sectionType, chunks, data, config, calculos = null,
+  onChunk = null, onValidation = null
 ) {
   let userPrompt
   switch (sectionType) {
@@ -425,17 +539,26 @@ export async function generateSection(
     case 'sentencia':    userPrompt = buildSentenciaUserPrompt(chunks, data, config, calculos); break
     default: throw new Error(`Sección desconocida: ${sectionType}`)
   }
-  // 4800 para las pesadas (sigue siendo ~3500 palabras), 4000 para el resto
   const maxTokens = sectionType === 'segunda' || sectionType === 'sentencia' ? 4800 : 4000
-  return await callClaude(apiKey, userPrompt, maxTokens, onChunk)
+  const text = await callClaude(apiKey, userPrompt, maxTokens, onChunk)
+
+  if (typeof onValidation === 'function') {
+    const findings = validarTextoSentencia(text)
+    onValidation({ sectionType, findings })
+  }
+
+  return text
 }
 
-// Re-exports para conveniencia
+// =============================================================================
+// Re-exports
+// =============================================================================
+
 export { detectarVarianteWeiss } from './sentenciaPrompts'
 export { parseCalculadorCALM, adaptToCalculos, esPlanillaCALM } from './parseCalculador'
 
 // =============================================================================
-// LECTURA DE ARCHIVOS EXTRA (sin cambios)
+// LECTURA DE ARCHIVOS EXTRA
 // =============================================================================
 
 export async function extractExtraFileText(file) {
