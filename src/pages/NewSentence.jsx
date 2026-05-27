@@ -6,7 +6,8 @@ import {
   tryParsePlanillaCALM, detectarTipoAccion, validarTextoSentencia,
 } from '../lib/claude'
 import {
-  buildAdhesionPrimera, buildAdhesionSegunda, detectarVarianteWeiss
+  buildAdhesionPrimera, buildAdhesionSegunda, detectarVarianteWeiss,
+  buildEncabezadoSentencia
 } from '../lib/sentenciaPrompts'
 import { getRipteFechaAccidente } from '../lib/ripteHistorico'
 import { saveSentence } from '../lib/supabase'
@@ -467,12 +468,20 @@ export default function NewSentence({ profile, session }) {
       )
       fullSentence += segunda + '\n\n'
       fullSentence += buildAdhesionSegunda(config, calculos, data) + '\n\n'
+ 
+      // Encabezado oficial "SENTENCIA / AUTOS Y VISTOS / RESUELVE" — texto fijo
+      // del tribunal, no pasa por el LLM. La fórmula "por mayoría / por unanimidad"
+      // se decide según cómo vota Weiss.
+      const varianteWeiss = detectarVarianteWeiss(calculos, data)
+      fullSentence += buildEncabezadoSentencia(varianteWeiss) + '\n\n'
       setSentenceText(fullSentence)
  
       setGenStep(8); setGenProgress(93)
       const dispositivo = await generateSection(
         apiKey, 'sentencia', chunks, data, config, calculos, streamUpdate, onValidation
       )
+      fullSentence += dispositivo + '\n\n'
+      setSentenceText(fullSentence)
  
       // Guardar findings del validador para mostrarlos en la UI
       setValidationFindings(allFindings)
