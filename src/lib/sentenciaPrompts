@@ -688,6 +688,7 @@ NO incluyas:
 - Headers Markdown ("#", "##", "###") en cualquier parte de tu output.
  
 Tu output completo debe caber holgadamente en una sola respuesta. Si tu redacción se está volviendo extensa, prioritzá la conclusión: el dictamen del perito, los porcentajes, las preexistencias (si las hay), y el cierre que cierra la cuestión. Mejor ser conciso y llegar al cierre, que extenderse y truncarse.`;
+}
 
 // =============================================================================
 // 4. IBM + CIERRE PRIMERA CUESTIÓN
@@ -759,7 +760,8 @@ PROHIBIDO antes de esa frase:
 - NO incluyas la indemnización ni la comparación RIPTE — eso va en la Segunda Cuestión.
 - NO incluyas adhesiones.
 - Terminá con "Así lo voto (art. 57 inc. 4 ley 15.057)." y nada más después.`;
-
+}
+ 
 // =============================================================================
 // 5. SEGUNDA CUESTIÓN
 // =============================================================================
@@ -1001,7 +1003,8 @@ El sistema ya agrega por código los encabezados "S E N T E N C I A" y "R E S U 
 - Numerá los incisos como aparecen arriba.
 - ${esEnf ? 'ENFERMEDAD: NO cites art. 3 ley 26.773 en el inciso 2°.' : esRev ? 'REVISIÓN CM: citá art. 2 inc. j ley 15.057 en la condena principal.' : 'ACCIDENTE: SÍ citá art. 3 ley 26.773.'}
 - Si rechaza la demanda: omití CBU, intereses por mora, instrucciones de pago de honorarios.`;
-
+}
+ 
 // =============================================================================
 // ADHESIONES (texto fijo, sin cambios)
 // =============================================================================
