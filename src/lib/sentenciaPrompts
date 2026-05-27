@@ -1046,3 +1046,19 @@ export function detectarVarianteWeiss(calculos, datos) {
   if (datos?.denuncia_inconst_ley_23928) return 1;
   return 2;
 }
+// =============================================================================
+// ENCABEZADO OFICIAL DE LA SENTENCIA (entre Acuerdo y dispositivo)
+// =============================================================================
+//
+// Texto fijo del tribunal. No pasa por el LLM, se concatena por código.
+// La variable es "por mayoría" vs "por unanimidad" según cómo vota Weiss.
+ 
+export function buildEncabezadoSentencia(varianteWeiss) {
+  // varianteWeiss: 1 → discrepa con fundamento (caso "Barrios")
+  //                2 → adhiere dejando a salvo criterio del TT4
+  //                3 → adhiere sin reservas (típicamente cuando se rechaza la demanda)
+  const formula = varianteWeiss === 3 ? 'por unanimidad' : 'por mayoría';
+  return `**SENTENCIA**
+ 
+AUTOS Y VISTOS: CONSIDERANDO: Lo decidido en el Acuerdo que antecede y los fundamentos que lo sustentan, el Tribunal ${formula} RESUELVE:`;
+}
