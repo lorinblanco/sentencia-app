@@ -159,9 +159,33 @@ Los valores en letras vienen pre-resueltos — usalos textualmente.
 - "Llega incuestionado que..."
 - "Las partes discrepan en cuanto a..."
 - "Al efecto y a fin de discernir la cuestión controvertida..."
-- "Adviértase que..."
+-  "Adviértase que..."
 - "En virtud de lo expuesto..."
-- "Así lo voto (art. 57 inc. 4 ley 15.057)."`;
+- "Así lo voto (art. 57 inc. 4 ley 15.057)."
+ 
+# REGLA DE FORMATO DE OUTPUT (CRÍTICA — NO IGNORAR)
+ 
+Tu output se va a concatenar MECÁNICAMENTE con otras secciones que se escriben en llamadas separadas. Por eso seguí estas reglas SIEMPRE:
+ 
+1. NUNCA escribas estos encabezados a menos que el prompt te los pida explícitamente:
+   - "PRIMERA CUESTIÓN", "SEGUNDA CUESTIÓN"
+   - "AUTOS Y VISTO", "CONSIDERANDO", "VISTOS"
+   - "SENTENCIA", "SENTENCIA DISPOSITIVO"
+   - "RESUELVE", "R E S U E L V E:", "R E S U E L V E"
+   - "Por ello, atento a..." (preámbulo del dispositivo)
+   El sistema agrega esos encabezados por código en el lugar correcto.
+ 
+2. NUNCA pongas el nombre de un juez al inicio o final de tu output. El sistema ya escribe "A LA PRIMERA CUESTIÓN PLANTEADA [JUEZ] DIJO:" antes de invocarte, y las adhesiones después. Vos solo escribís el cuerpo del voto.
+ 
+3. NUNCA inventes nombres de jueces. Los únicos jueces de este tribunal son los tres que el sistema te pasa: Andrea Marcela Zacarías, Mario Daniel Stolarczyk, María Alejandra Weiss. Si alguna vez no recordás un nombre, no lo improvises — usá el que figura en config.
+ 
+4. NUNCA uses encabezados tipo Markdown ("# titulo", "## subtitulo", "### subsub") en tu output. Las "##" que aparecen en los prompts son indicadores ESTRUCTURALES para vos, NO instrucciones de formato. Tu output debe ser prosa corrida con párrafos separados por dobles saltos de línea, sin headers.
+ 
+5. NUNCA numeres tus secciones con números romanos (I, II, III, ..., VIII, IX) ni con números arábigos enmarcados como títulos ("**1.** Sección", "## 2. Sección"). Esos son artefactos. Las únicas numeraciones permitidas son las de incisos del dispositivo ("1°)", "2°)") cuando el prompt te lo pida explícitamente, y los grados/porcentajes/montos dentro del cuerpo.
+ 
+6. Cada sección empieza EXACTAMENTE con la frase que el prompt te indique. Si el prompt dice "Empezá con 'Antecedentes:'", tu primer carácter es la 'A' de Antecedentes. Si dice "Empezá con 'A fin de determinar el ingreso...'", tu primer carácter es la 'A' de "A fin". No agregues nada antes — ni encabezados, ni saludos, ni introducciones meta.
+ 
+Estos 6 puntos son ABSOLUTOS. Cualquier desviación rompe el ensamblado de la sentencia y queda visible como artefacto en el Word final.`;
 
 // =============================================================================
 // HELPERS
@@ -653,11 +677,17 @@ ${(datos?.preexistencias_denunciadas?.length || 0) > 0
 ## 5. CONCLUSIÓN
 ${bloqueRevisionCM}
 
-# FORMATO
-
-Comenzá con "Resolución:" — sin título adicional.
-No incluyas IBM, edad, ni cierre "Así lo voto".`;
-}
+# FORMATO DEL OUTPUT (CRÍTICO)
+ 
+Tu PRIMER carácter de output es la 'R' de "Resolución:". No agregues ningún encabezado, ningún número romano, ni el nombre de un juez antes.
+ 
+NO incluyas:
+- IBM, edad del trabajador, salarios mensuales (eso va en una sección aparte).
+- "Así lo voto" o "(art. 57 inc. 4 ley 15.057)" (eso va en una sección aparte).
+- Encabezados de cuestión, "PRIMERA CUESTIÓN", "SEGUNDA CUESTIÓN", etc.
+- Headers Markdown ("#", "##", "###") en cualquier parte de tu output.
+ 
+Tu output completo debe caber holgadamente en una sola respuesta. Si tu redacción se está volviendo extensa, prioritzá la conclusión: el dictamen del perito, los porcentajes, las preexistencias (si las hay), y el cierre que cierra la cuestión. Mejor ser conciso y llegar al cierre, que extenderse y truncarse.`;
 
 // =============================================================================
 // 4. IBM + CIERRE PRIMERA CUESTIÓN
@@ -714,12 +744,21 @@ Insertá literalmente:
 
 "Así lo voto (art. 57 inc. 4 ley 15.057)."
 
-# IMPORTANTE
-
+# FORMATO DEL OUTPUT (CRÍTICO)
+ 
+Tu PRIMER carácter de output debe ser la 'A' de la frase "A fin de determinar el ingreso base mensual, tendré en consideración el promedio mensual...". 
+ 
+PROHIBIDO antes de esa frase:
+- Cualquier encabezado: "PRIMERA CUESTIÓN", "INGRESO BASE MENSUAL", "VIII.- ...", "IBM", etc.
+- Cualquier nombre de juez ("El Dr. X dijo:", "DIJO:", etc.).
+- Numeración romana (VIII, IX, X) ni numeración arábiga ("1.", "2.").
+- Headers Markdown ("#", "##", "###") en cualquier parte de tu output.
+ 
+# CONTENIDO
+ 
 - NO incluyas la indemnización ni la comparación RIPTE — eso va en la Segunda Cuestión.
 - NO incluyas adhesiones.
-- Terminá con "Así lo voto" y nada más.`;
-}
+- Terminá con "Así lo voto (art. 57 inc. 4 ley 15.057)." y nada más después.`;
 
 // =============================================================================
 // 5. SEGUNDA CUESTIÓN
@@ -946,12 +985,22 @@ ${haceLugar ? `
 
 "REGISTRESE, NOTIFIQUESE, con transcripción de lo dispuesto en el art. 54 Ley 14.967 y oportunamente ARCHIVESE."
 
-# IMPORTANTE
-
+# FORMATO DEL OUTPUT (CRÍTICO)
+ 
+Tu PRIMER carácter de output debe ser el "1" del inciso "1°)". 
+ 
+PROHIBIDO antes del primer inciso:
+- Encabezados: "SENTENCIA DISPOSITIVO", "SENTENCIA", "R E S U E L V E:", "R E S U E L V E", "RESUELVE".
+- Preámbulos: "Por ello, atento a las normas constitucionales...", "VISTOS", "AUTOS Y VISTOS", "Considerando".
+- Headers Markdown ("#", "##", "###") en cualquier parte de tu output.
+ 
+El sistema ya agrega por código los encabezados "S E N T E N C I A" y "R E S U E L V E:" en el lugar correcto. Vos solo escribís los incisos numerados.
+ 
+# CONTENIDO
+ 
 - Numerá los incisos como aparecen arriba.
 - ${esEnf ? 'ENFERMEDAD: NO cites art. 3 ley 26.773 en el inciso 2°.' : esRev ? 'REVISIÓN CM: citá art. 2 inc. j ley 15.057 en la condena principal.' : 'ACCIDENTE: SÍ citá art. 3 ley 26.773.'}
 - Si rechaza la demanda: omití CBU, intereses por mora, instrucciones de pago de honorarios.`;
-}
 
 // =============================================================================
 // ADHESIONES (texto fijo, sin cambios)
