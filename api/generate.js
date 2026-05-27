@@ -10,7 +10,7 @@
 //   - Mantiene el modo no-streaming para extract (necesita JSON completo).
 // =============================================================================
 
-export const config = { maxDuration: 60 }
+export const config = { maxDuration: 120 }
 
 const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages'
 const ANTHROPIC_VERSION = '2023-06-01'
