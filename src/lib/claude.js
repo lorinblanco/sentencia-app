@@ -539,7 +539,17 @@ export async function generateSection(
     case 'sentencia':    userPrompt = buildSentenciaUserPrompt(chunks, data, config, calculos); break
     default: throw new Error(`Sección desconocida: ${sectionType}`)
   }
-  const maxTokens = sectionType === 'segunda' || sectionType === 'sentencia' ? 4800 : 4000
+  // Presupuestos de tokens por sección. Resolución es la sección más larga
+  // (transcribe pericia + impugnación + respuesta perito) — necesita 8000.
+  // Segunda incluye razonamiento constitucional + comparativa numérica.
+  const MAX_TOKENS_BY_SECTION = {
+    antecedentes: 6000,
+    resolucion: 8000,
+    ibm: 5000,
+    segunda: 7000,
+    sentencia: 5500,
+  }
+  const maxTokens = MAX_TOKENS_BY_SECTION[sectionType] || 4000
   const text = await callClaude(apiKey, userPrompt, maxTokens, onChunk)
 
   if (typeof onValidation === 'function') {
