@@ -13,6 +13,7 @@ import { getRipteFechaAccidente } from '../lib/ripteHistorico'
 import { saveSentence } from '../lib/supabase'
 import { buildWordDocument } from '../lib/word'
 
+const sleep = (ms) => new Promise(r => setTimeout(r, ms))
 const OPCIONES_VOTO = [
   {
     id: 'zacarias_primero',
@@ -444,14 +445,16 @@ export default function NewSentence({ profile, session }) {
       )
       fullSentence += antecedentes + '\n\n'
       setSentenceText(fullSentence)
- 
+
+      await sleep(15000)
       setGenStep(5); setGenProgress(60)
       const resolucion = await generateSection(
         apiKey, 'resolucion', chunks, data, config, calculos, streamUpdate, onValidation
       )
       fullSentence += resolucion + '\n\n'
       setSentenceText(fullSentence)
- 
+
+      await sleep(15000)
       setGenStep(6); setGenProgress(72)
       const ibm = await generateSection(
         apiKey, 'ibm', chunks, data, config, calculos, streamUpdate, onValidation
@@ -461,29 +464,30 @@ export default function NewSentence({ profile, session }) {
       fullSentence += `SEGUNDA CUESTIÓN: ¿Qué pronunciamiento corresponde dictar?\n\n`
       fullSentence += `A LA SEGUNDA CUESTIÓN PLANTEADA ${voto.juez1.nombreCompleto} DIJO:\n\n`
       setSentenceText(fullSentence)
- 
+
+      await sleep(15000)
       setGenStep(7); setGenProgress(85)
       const segunda = await generateSection(
         apiKey, 'segunda', chunks, data, config, calculos, streamUpdate, onValidation
       )
       fullSentence += segunda + '\n\n'
       fullSentence += buildAdhesionSegunda(config, calculos, data) + '\n\n'
- 
+
       // Encabezado oficial "SENTENCIA / AUTOS Y VISTOS / RESUELVE" — texto fijo
       // del tribunal, no pasa por el LLM. La fórmula "por mayoría / por unanimidad"
       // se decide según cómo vota Weiss.
       const varianteWeiss = detectarVarianteWeiss(calculos, data)
       fullSentence += buildEncabezadoSentencia(varianteWeiss) + '\n\n'
       setSentenceText(fullSentence)
- 
+
+      await sleep(15000)
       setGenStep(8); setGenProgress(93)
-const dispositivo = await generateSection(
-  apiKey, 'sentencia', chunks, data, config, calculos, streamUpdate, onValidation
-)
-fullSentence += dispositivo + '\n\n'
-fullSentence += buildCierreArt54() + '\n\n'
-setSentenceText(fullSentence)
- 
+      const dispositivo = await generateSection(
+        apiKey, 'sentencia', chunks, data, config, calculos, streamUpdate, onValidation
+      )
+      fullSentence += dispositivo + '\n\n'
+      fullSentence += buildCierreArt54() + '\n\n'
+      setSentenceText(fullSentence) 
       // Guardar findings del validador para mostrarlos en la UI
       setValidationFindings(allFindings)
       setGenStep(9); setGenProgress(98)
