@@ -1,31 +1,22 @@
 // src/lib/claude.js
 // =============================================================================
-// SentencIA - Claude API client v11 (PROMPT CACHING)
+// SentencIA - Claude API client v10
 // =============================================================================
-// Cambios v10 → v11:
-//   1. callClaude() acepta un 5º parámetro `cacheableContent` (string). Si
-//      viene, arma el mensaje del usuario como DOS bloques:
-//        content[0] = { text: cacheableContent, cache_control: ephemeral }  ← expediente
-//        content[1] = { text: userPrompt }                                  ← variable
-//      Además cachea el SYSTEM_PROMPT. Esto hace que de la 2ª a la 6ª llamada:
-//        - El expediente + system se lean del cache a 0.10x del precio.
-//        - Los cache reads NO cuenten contra el ITPM (rate limit 30k/min) en
-//          Sonnet 4.5 → desaparece el error de rate limit en expedientes largos.
-//      Si NO viene cacheableContent, callClaude funciona como antes (compat).
-//   2. extractBasicInfo() y generateSection() construyen el bloque cacheable
-//      una sola vez con buildExpedienteCacheable(chunks) y se lo pasan a
-//      callClaude. El bloque es IDÉNTICO en las 6 llamadas → acumula hits.
-//   3. buildChunks() ya NO inyecta los extraTexts dentro de chunks.afip.
-//      Ahora retorna chunks.fullText y chunks.extraTexts como campos propios,
-//      que buildExpedienteCacheable consume para armar el bloque único.
-//
-// Cambios previos v9 → v10 (intactos):
-//   - detectarTipoAccion(), validarTextoSentencia(), buildCalculos(tipoAccion).
+// Cambios v9 → v10:
+//   1. detectarTipoAccion() reemplaza detectarEsEnfermedad(). Devuelve uno de
+//      tres valores: 'ACCIDENTE' | 'ENFERMEDAD' | 'REVISION_CM'.
+//      detectarEsEnfermedad() se mantiene como wrapper deprecated por compat.
+//   2. validarTextoSentencia() escanea el texto generado en busca de frases
+//      de fabricación ("si bien no surge...", "se desprende que...", etc.) y
+//      devuelve la lista de hallazgos para mostrar al juez antes del DOCX.
+//   3. generateSection() corre el validador automáticamente y adjunta los
+//      hallazgos al callback opcional onValidation.
+//   4. buildCalculos() recibe el tipoAccion (string) en lugar del flag
+//      booleano esEnfermedad.
 // =============================================================================
 
 import {
   SYSTEM_PROMPT,
-  buildExpedienteCacheable,
   buildExtractUserPrompt,
   buildAntecedentesUserPrompt,
   buildResolucionUserPrompt,
@@ -83,14 +74,7 @@ export async function extractAllText(file, onProgress) {
 }
 
 // =============================================================================
-// CHUNKING
-// =============================================================================
-// NOTA v11: los chunks (header, pericia, afip, alegatos, final) SE SIGUEN
-// calculando porque detectarTipoAccion() los usa para detección programática
-// (chunks.header.toLowerCase()). Pero YA NO se inyectan en los prompts del
-// LLM — el LLM ve el expediente completo vía buildExpedienteCacheable(chunks),
-// que usa chunks.fullText. Los chunks individuales quedan como fallback para
-// el caso (raro) en que no haya fullText.
+// CHUNKING — chunk de pericia ampliado a 28k para capturar el dictamen completo
 // =============================================================================
 
 export function buildChunks(fullText, extraTexts = []) {
@@ -155,9 +139,15 @@ export function buildChunks(fullText, extraTexts = []) {
   ])
   if (afipIdx < 0) afipIdx = find(['afip', 'ripte'])
 
-  const afip = afipIdx > 0
+  let afip = afipIdx > 0
     ? slice(afipIdx - 2000, 22000)
     : fullText.slice(Math.floor(len * 0.58), Math.floor(len * 0.58) + 22000)
+
+  if (extraTexts.length > 0) {
+    afip = 'REMUNERACIONES INFORMADAS POR AFIP (archivos adjuntos):\n\n' +
+           extraTexts.join('\n\n---\n\n') +
+           '\n\n=== TEXTO DEL EXPEDIENTE ===\n\n' + afip
+  }
 
   const alegIdx = find([
     'presenta alegato', 'presentó su alegato',
@@ -170,13 +160,7 @@ export function buildChunks(fullText, extraTexts = []) {
 
   const final_ = fullText.slice(Math.max(0, len - 12000))
 
-  // v11: fullText y extraTexts viajan en el objeto chunks. El bloque cacheable
-  // (buildExpedienteCacheable) los lee desde acá. Ya NO se inyectan en afip.
-  return {
-    header, pericia, afip, alegatos, final: final_,
-    fullText,
-    extraTexts: Array.isArray(extraTexts) ? extraTexts : [],
-  }
+  return { header, pericia, afip, alegatos, final: final_ }
 }
 
 // =============================================================================
@@ -195,9 +179,13 @@ export async function tryParsePlanillaCALM(file) {
 }
 
 // =============================================================================
-// DETECCIÓN DE TIPO DE ACCIÓN (3 valores) — sin cambios
+// DETECCIÓN DE TIPO DE ACCIÓN (3 valores)
 // =============================================================================
 
+/**
+ * Devuelve 'ACCIDENTE' | 'ENFERMEDAD' | 'REVISION_CM' analizando keywords
+ * del header + el JSON del extract.
+ */
 export function detectarTipoAccion(chunks, datos) {
   const tag = (datos?.tipoAccion || '').toUpperCase()
   if (tag === 'ACCIDENTE' || tag === 'ENFERMEDAD' || tag === 'REVISION_CM') {
@@ -207,6 +195,8 @@ export function detectarTipoAccion(chunks, datos) {
   const headerLower = (chunks?.header || '').toLowerCase()
   const tipoLLM = (datos?.tipo_accion_detectado || datos?.tipo_accion || '').toLowerCase()
 
+  // Prioridad: REVISIÓN CM Ley 15.057 (mirar primero — puede convivir con
+  // keywords de accidente o enfermedad)
   const indicadoresRevision = [
     'acción de revisión',
     'accion de revision',
@@ -229,6 +219,7 @@ export function detectarTipoAccion(chunks, datos) {
     return 'REVISION_CM'
   }
 
+  // ENFERMEDAD
   if (tipoLLM.includes('enfermedad')) return 'ENFERMEDAD'
   const indicadoresEnf = [
     's/ enfermedad profesional',
@@ -243,12 +234,16 @@ export function detectarTipoAccion(chunks, datos) {
   return 'ACCIDENTE'
 }
 
+/**
+ * Wrapper deprecated: devuelve true si tipo es ENFERMEDAD.
+ * Mantenido por compatibilidad.
+ */
 export function detectarEsEnfermedad(chunks, datos) {
   return detectarTipoAccion(chunks, datos) === 'ENFERMEDAD'
 }
 
 // =============================================================================
-// VALIDADOR DE ALUCINACIONES — sin cambios
+// VALIDADOR DE ALUCINACIONES
 // =============================================================================
 
 const PATRONES_FABRICACION = [
@@ -295,6 +290,10 @@ const PATRONES_FABRICACION = [
   },
 ]
 
+/**
+ * Escanea un texto buscando frases de fabricación.
+ * @returns {Array<{code, msg, pasaje, isInfo}>}
+ */
 export function validarTextoSentencia(texto) {
   if (!texto) return []
   const hallazgos = []
@@ -319,46 +318,18 @@ export function validarTextoSentencia(texto) {
 }
 
 // =============================================================================
-// CALL CLAUDE — streaming SSE + PROMPT CACHING
+// CALL CLAUDE — streaming SSE
 // =============================================================================
 
-/**
- * @param {string}   apiKey
- * @param {string}   userPrompt        prompt VARIABLE de la sección
- * @param {number}   maxTokens
- * @param {Function} [onChunk]         callback de streaming (piece, soFar)
- * @param {string}   [cacheableContent] bloque ESTÁTICO del expediente. Si viene,
- *                                      se manda con cache_control y se cachea
- *                                      también el SYSTEM_PROMPT.
- */
-async function callClaude(apiKey, userPrompt, maxTokens = 4000, onChunk = null, cacheableContent = null) {
+async function callClaude(apiKey, userPrompt, maxTokens = 4000, onChunk = null) {
   const useStream = typeof onChunk === 'function'
-  const useCache = typeof cacheableContent === 'string' && cacheableContent.length > 0
-
-  // SYSTEM: si cacheamos, lo mandamos como array de bloques con cache_control.
-  // Si no, como string (modo legacy, compatible con el proxy).
-  const systemPayload = useCache
-    ? [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }]
-    : SYSTEM_PROMPT
-
-  // MESSAGES: si cacheamos, el user content son dos bloques (expediente cacheado
-  // + prompt variable). Si no, un solo string.
-  const messages = useCache
-    ? [{
-        role: 'user',
-        content: [
-          { type: 'text', text: cacheableContent, cache_control: { type: 'ephemeral' } },
-          { type: 'text', text: userPrompt },
-        ],
-      }]
-    : [{ role: 'user', content: userPrompt }]
 
   const res = await fetch('/api/generate', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Api-Key': apiKey },
     body: JSON.stringify({
-      system: systemPayload,
-      messages,
+      system: SYSTEM_PROMPT,
+      messages: [{ role: 'user', content: userPrompt }],
       max_tokens: maxTokens,
       stream: useStream,
     }),
@@ -372,15 +343,6 @@ async function callClaude(apiKey, userPrompt, maxTokens = 4000, onChunk = null, 
     if (!res.ok) throw new Error(data.error?.message || data.error || `Error HTTP ${res.status}`)
     if (data.error) throw new Error(data.error.message || JSON.stringify(data.error))
     if (!data.content?.[0]?.text) throw new Error('Respuesta vacía de la API')
-    // Log de telemetría de cache (útil para verificar que el cache pega)
-    if (data.usage) {
-      console.log('[cache] usage:', {
-        input: data.usage.input_tokens,
-        cache_write: data.usage.cache_creation_input_tokens,
-        cache_read: data.usage.cache_read_input_tokens,
-        output: data.usage.output_tokens,
-      })
-    }
     return data.content[0].text
   }
 
@@ -427,14 +389,6 @@ async function callClaude(apiKey, userPrompt, maxTokens = 4000, onChunk = null, 
           fullText += piece
           onChunk(piece, fullText)
         }
-      } else if (obj.type === 'message_start' && obj.message?.usage) {
-        // Telemetría de cache en streaming (llega en message_start)
-        const u = obj.message.usage
-        console.log('[cache] usage:', {
-          input: u.input_tokens,
-          cache_write: u.cache_creation_input_tokens,
-          cache_read: u.cache_read_input_tokens,
-        })
       } else if (obj.type === 'error' || eventName === 'error') {
         streamError = obj.error?.message || obj.message || 'Stream error'
       }
@@ -447,7 +401,7 @@ async function callClaude(apiKey, userPrompt, maxTokens = 4000, onChunk = null, 
 }
 
 // =============================================================================
-// PRE-CÁLCULOS con tipoAccion (3 valores) — sin cambios
+// PRE-CÁLCULOS con tipoAccion (3 valores)
 // =============================================================================
 
 function parseMonto(s) {
@@ -464,9 +418,17 @@ function calcIndemnizacion(ibm, edad, porcentaje) {
   return 53 * ibm * 65 / edad * (porcentaje / 100)
 }
 
+/**
+ * Construye los cálculos para la sentencia.
+ *
+ * @param {string} tipoAccion         'ACCIDENTE' | 'ENFERMEDAD' | 'REVISION_CM'
+ * @param {boolean} accidenteEnRevision  solo si tipoAccion=REVISION_CM:
+ *                                    true si el hecho denunciado es accidente.
+ */
 export function buildCalculos(
   config, datos, calmParsed = null, tipoAccion = 'ACCIDENTE', accidenteEnRevision = true
 ) {
+  // Compat hacia atrás (4to arg boolean = esEnfermedad)
   if (tipoAccion === true) tipoAccion = 'ENFERMEDAD'
   else if (tipoAccion === false) tipoAccion = 'ACCIDENTE'
 
@@ -475,17 +437,21 @@ export function buildCalculos(
   else if (tipoAccion === 'ENFERMEDAD') esAccidente = false
   else esAccidente = accidenteEnRevision
 
+  // RUTA 1: planilla CALM
   if (calmParsed && calmParsed.esValida) {
     const adapted = adaptToCalculos(calmParsed, esAccidente)
     adapted.tipoAccion = tipoAccion
     return adapted
   }
 
+  // RUTA 2: cálculo manual
   const ripteActual = parseMonto(config.ripte_actual)
   const ripteAccidente = parseMonto(config.ripte_accidente)
   const intereseseBNA = parseMonto(config.intereses_bna)
   const ibmBruto = parseMonto(config.ibm_bruto) || parseMonto(datos?.ibm_bruto_afip)
   const edad = config.edad_actor || datos?.actor?.edad_al_accidente
+  // CLAVE: % de incapacidad para la condena viene de la ACREDITADA (pericia),
+  // no del % reclamado en la demanda.
   const porcentaje = config.porcentaje_incapacidad
     || datos?.incapacidad_acreditada_pericia?.total_porcentaje
     || datos?.pericia_medica?.incapacidad_total_perito
@@ -534,13 +500,12 @@ export function buildCalculos(
 }
 
 // =============================================================================
-// EXTRACT (no streaming) — ahora con bloque cacheable
+// EXTRACT (no streaming)
 // =============================================================================
 
 export async function extractBasicInfo(apiKey, chunks) {
-  const cacheable = buildExpedienteCacheable(chunks)
   const prompt = buildExtractUserPrompt(chunks)
-  const text = await callClaude(apiKey, prompt, 3000, null, cacheable)
+  const text = await callClaude(apiKey, prompt, 3000)
   try {
     const clean = text.replace(/```json|```/g, '').trim()
     const json = JSON.parse(clean)
@@ -553,15 +518,18 @@ export async function extractBasicInfo(apiKey, chunks) {
 }
 
 // =============================================================================
-// GENERATE SECTION — streaming + validador + bloque cacheable
+// GENERATE SECTION — streaming + validador
 // =============================================================================
 
+/**
+ * @param {Function} [onChunk]      callback de streaming (piece, soFar)
+ * @param {Function} [onValidation] callback con hallazgos del validador,
+ *                                  invocado al final con { sectionType, findings }
+ */
 export async function generateSection(
   apiKey, sectionType, chunks, data, config, calculos = null,
   onChunk = null, onValidation = null
 ) {
-  const cacheable = buildExpedienteCacheable(chunks)
-
   let userPrompt
   switch (sectionType) {
     case 'antecedentes': userPrompt = buildAntecedentesUserPrompt(chunks, data, config); break
@@ -571,7 +539,9 @@ export async function generateSection(
     case 'sentencia':    userPrompt = buildSentenciaUserPrompt(chunks, data, config, calculos); break
     default: throw new Error(`Sección desconocida: ${sectionType}`)
   }
-
+  // Presupuestos de tokens por sección. Resolución es la sección más larga
+  // (transcribe pericia + impugnación + respuesta perito) — necesita 8000.
+  // Segunda incluye razonamiento constitucional + comparativa numérica.
   const MAX_TOKENS_BY_SECTION = {
     antecedentes: 6000,
     resolucion: 8000,
@@ -580,7 +550,7 @@ export async function generateSection(
     sentencia: 5500,
   }
   const maxTokens = MAX_TOKENS_BY_SECTION[sectionType] || 4000
-  const text = await callClaude(apiKey, userPrompt, maxTokens, onChunk, cacheable)
+  const text = await callClaude(apiKey, userPrompt, maxTokens, onChunk)
 
   if (typeof onValidation === 'function') {
     const findings = validarTextoSentencia(text)
@@ -598,7 +568,7 @@ export { detectarVarianteWeiss } from './sentenciaPrompts'
 export { parseCalculadorCALM, adaptToCalculos, esPlanillaCALM } from './parseCalculador'
 
 // =============================================================================
-// LECTURA DE ARCHIVOS EXTRA — sin cambios
+// LECTURA DE ARCHIVOS EXTRA
 // =============================================================================
 
 export async function extractExtraFileText(file) {
