@@ -1,33 +1,33 @@
 // src/lib/sentenciaPrompts.js
 // =============================================================================
-// SENTENCIA — PROMPTS v2.5 (anti-fabricación + Acción de Revisión Ley 15.057)
+// SENTENCIA — PROMPTS v3.0 (PROMPT CACHING)
 // Tribunal del Trabajo N° 5 - Departamento Judicial de Quilmes
 // Mayo 2026
 // =============================================================================
 //
-// Cambios v2.4 → v2.5:
-//   1. SYSTEM_PROMPT con bloque "REGLA ANTI-FABRICACIÓN" prohibiendo
-//      explícitamente las frases que causaron alucinaciones en JAKUTOWICZ
-//      (sentencia atribuyó al perito el 24% que reclamaba el actor en la
-//      demanda; inventó un perito psicólogo inexistente).
-//   2. Marcador estándar [FALTA: descripción] cuando un dato no figura en
-//      ninguna fuente. El juez lo completa después en el DOCX.
-//   3. Separación explícita en el extract entre:
-//        - incapacidad_reclamada_demanda  (lo que dice la demanda)
-//        - incapacidad_acreditada_pericia (lo que dice la pericia judicial)
-//      Los prompts SIEMPRE usan la segunda para el dispositivo.
-//   4. Tres tipos de acción: ACCIDENTE | ENFERMEDAD | REVISION_CM
-//      (acción de revisión de Comisión Médica art. 2 inc. j ley 15.057).
-//   5. Cuando hay planilla CALM, el % de incapacidad de la planilla pasa
-//      a los prompts narrativos como VALOR VINCULANTE (no solo a los cálculos).
-//   6. pericia_psiquiatrica.tiene es estricto: solo true si HAY perito
-//      psicólogo o psiquiatra designado en autos (no si la demanda menciona
-//      daño psicológico).
+// Cambios v2.5 → v3.0:
+//   1. Nueva función `buildExpedienteCacheable(chunks)` que arma el bloque
+//      ESTÁTICO con el expediente completo (idéntico en las 6 llamadas).
+//      Este bloque se manda con cache_control desde claude.js, lo que:
+//        - Quita los chunks del prompt variable de cada sección.
+//        - Permite que en la 2ª-6ª llamada Anthropic lea del cache a 0.10x
+//          del precio normal (90% menos).
+//        - Hace que los cache reads NO cuenten contra el ITPM (rate limit
+//          de 30k tokens/min) en Sonnet 4.5.
+//   2. Las 6 funciones build*UserPrompt YA NO incluyen `${chunks.xxx}` en
+//      su cuerpo. En su lugar, instruyen al modelo a consultar el bloque
+//      cacheado, dando palabras clave de búsqueda para guiarlo.
+//   3. El extractor pasa a ver el EXPEDIENTE COMPLETO (no el 15% como en v2.5).
+//      Esto resuelve el problema de datos faltantes en expedientes largos.
 //
+// IMPORTANTE: el bloque cacheable debe ser IDÉNTICO en las 6 llamadas para
+// que se acumulen los hits de cache. Cualquier valor que cambie entre
+// llamadas (datos, calculos, instrucción de sección) DEBE ir en el prompt
+// variable, NUNCA en buildExpedienteCacheable.
 // =============================================================================
 
 // =============================================================================
-// SYSTEM PROMPT
+// SYSTEM PROMPT (sin cambios respecto de v2.5)
 // =============================================================================
 
 export const SYSTEM_PROMPT = `Sos integrante del Tribunal del Trabajo N° 5 del Departamento Judicial de Quilmes, Provincia de Buenos Aires, Argentina. Redactás proyectos de sentencias judiciales laborales con el NIVEL DE DETALLE EXACTO y el ESTILO de las sentencias reales del tribunal.
@@ -162,11 +162,11 @@ Los valores en letras vienen pre-resueltos — usalos textualmente.
 -  "Adviértase que..."
 - "En virtud de lo expuesto..."
 - "Así lo voto (art. 57 inc. 4 ley 15.057)."
- 
+
 # REGLA DE FORMATO DE OUTPUT (CRÍTICA — NO IGNORAR)
- 
+
 Tu output se va a concatenar MECÁNICAMENTE con otras secciones que se escriben en llamadas separadas. Por eso seguí estas reglas SIEMPRE:
- 
+
 1. NUNCA escribas estos encabezados a menos que el prompt te los pida explícitamente:
    - "PRIMERA CUESTIÓN", "SEGUNDA CUESTIÓN"
    - "AUTOS Y VISTO", "CONSIDERANDO", "VISTOS"
@@ -174,18 +174,106 @@ Tu output se va a concatenar MECÁNICAMENTE con otras secciones que se escriben 
    - "RESUELVE", "R E S U E L V E:", "R E S U E L V E"
    - "Por ello, atento a..." (preámbulo del dispositivo)
    El sistema agrega esos encabezados por código en el lugar correcto.
- 
+
 2. NUNCA pongas el nombre de un juez al inicio o final de tu output. El sistema ya escribe "A LA PRIMERA CUESTIÓN PLANTEADA [JUEZ] DIJO:" antes de invocarte, y las adhesiones después. Vos solo escribís el cuerpo del voto.
- 
+
 3. NUNCA inventes nombres de jueces. Los únicos jueces de este tribunal son los tres que el sistema te pasa: Andrea Marcela Zacarías, Mario Daniel Stolarczyk, María Alejandra Weiss. Si alguna vez no recordás un nombre, no lo improvises — usá el que figura en config.
- 
+
 4. NUNCA uses encabezados tipo Markdown ("# titulo", "## subtitulo", "### subsub") en tu output. Las "##" que aparecen en los prompts son indicadores ESTRUCTURALES para vos, NO instrucciones de formato. Tu output debe ser prosa corrida con párrafos separados por dobles saltos de línea, sin headers.
- 
+
 5. NUNCA numeres tus secciones con números romanos (I, II, III, ..., VIII, IX) ni con números arábigos enmarcados como títulos ("**1.** Sección", "## 2. Sección"). Esos son artefactos. Las únicas numeraciones permitidas son las de incisos del dispositivo ("1°)", "2°)") cuando el prompt te lo pida explícitamente, y los grados/porcentajes/montos dentro del cuerpo.
- 
+
 6. Cada sección empieza EXACTAMENTE con la frase que el prompt te indique. Si el prompt dice "Empezá con 'Antecedentes:'", tu primer carácter es la 'A' de Antecedentes. Si dice "Empezá con 'A fin de determinar el ingreso...'", tu primer carácter es la 'A' de "A fin". No agregues nada antes — ni encabezados, ni saludos, ni introducciones meta.
- 
+
 Estos 6 puntos son ABSOLUTOS. Cualquier desviación rompe el ensamblado de la sentencia y queda visible como artefacto en el Word final.`;
+
+// =============================================================================
+// NUEVA FUNCIÓN — BLOQUE CACHEABLE DEL EXPEDIENTE
+// =============================================================================
+// Este bloque es IDÉNTICO en las 6 llamadas (extract + 5 secciones).
+// Se manda con cache_control: ephemeral desde claude.js.
+// La primera llamada paga 1.25x el input normal (cache write).
+// Las 5 siguientes leen del cache a 0.10x y NO cuentan contra ITPM.
+// =============================================================================
+
+export function buildExpedienteCacheable(chunks) {
+  if (!chunks) return '';
+
+  const fullText = chunks.fullText || '';
+  const extraTexts = chunks.extraTexts || [];
+
+  let bloque = `=== EXPEDIENTE JUDICIAL DIGITAL (MEV - SCBA) ===
+
+A continuación se transcribe el contenido íntegro del expediente bajo análisis del Tribunal del Trabajo N° 5 del Departamento Judicial de Quilmes. El expediente está en formato cronológico según las presentaciones MEV (Mesa de Entradas Virtual de la SCBA).
+
+ENCABEZADOS CARACTERÍSTICOS para localizar partes del expediente:
+- "Trámite: DEMANDA - SE PRESENTA" → escrito de demanda + letrado actor + datos del actor
+- "Trámite: DEMANDA - CONTESTA" → contestación de la demandada + letrado demandada
+- "Trámite: DICTAMEN PERICIAL - PRESENTA" → pericia médica (con "I- PROEMIO", "examen médico pericial", "baremación")
+- "Trámite: IMPUGNA DICTAMEN PERICIAL" → impugnación de la pericia (típicamente por la demandada)
+- "Trámite: PERITO - CONTESTA IMPUGNACIÓN" → respuesta del perito a la impugnación
+- "Trámite: ALEGATO - PRESENTA" → alegatos de las partes
+- "Comisión Médica N°", "Dictamen Médico Expte", "Disposición de Alcance Particular" → trámite previo CM (Ley 27.348 / acción de revisión Ley 15.057)
+- "remuneraciones informadas por AFIP", "RIPTE", "ingreso base mensual" → datos para cálculo de IBM
+
+Cada presentación tiene un encabezado MEV con la forma:
+    Trámite: [TIPO DE PRESENTACIÓN]
+    Fecha del Escrito: DD/MM/AAAA HH:MM:SS
+    Firmado por: APELLIDO Nombre (CUIT) - [Matricula: TOMO FOLIO]
+
+`;
+
+  if (fullText && fullText.length > 0) {
+    bloque += `=== TEXTO COMPLETO DEL EXPEDIENTE ===
+
+${fullText}
+
+=== FIN DEL EXPEDIENTE ===
+`;
+  } else {
+    // Fallback: usar chunks individuales si no hay fullText
+    if (chunks.header) bloque += `=== INICIO DEL EXPEDIENTE (demanda, contestación, datos básicos) ===
+
+${chunks.header}
+
+`;
+    if (chunks.pericia) bloque += `=== DICTAMEN PERICIAL MÉDICO ===
+
+${chunks.pericia}
+
+`;
+    if (chunks.afip) bloque += `=== REMUNERACIONES AFIP / IBM / RIPTE ===
+
+${chunks.afip}
+
+`;
+    if (chunks.alegatos) bloque += `=== ALEGATOS ===
+
+${chunks.alegatos}
+
+`;
+    if (chunks.final) bloque += `=== FINAL DEL EXPEDIENTE (impugnaciones, escritos posteriores) ===
+
+${chunks.final}
+
+`;
+    bloque += `=== FIN DEL EXPEDIENTE ===
+`;
+  }
+
+  if (extraTexts.length > 0) {
+    bloque += `
+
+=== ARCHIVOS ADJUNTOS (remuneraciones AFIP, planillas auxiliares, documentos complementarios) ===
+
+${extraTexts.join('\n\n---\n\n')}
+
+=== FIN DE ADJUNTOS ===
+`;
+  }
+
+  return bloque;
+}
 
 // =============================================================================
 // HELPERS
@@ -200,6 +288,10 @@ function tipoFromCalculos(calculos, datos) {
 }
 
 const REGLA_DATOS = `RECORDATORIO: usá TODOS los datos exactos del expediente y del JSON. Si un dato es estructuralmente necesario y NO figura en NINGUNA fuente, escribí literal "[FALTA: descripción]". NUNCA escribas frases como "si bien no surge...", "se desprende que...", "puede inferirse...", "presumiblemente...". NUNCA atribuyas al perito el % que reclama la demanda. NUNCA inventes un perito psicólogo si solo hubo legista.
+
+`;
+
+const REGLA_EXPEDIENTE_ARRIBA = `El EXPEDIENTE JUDICIAL COMPLETO ya está cargado arriba en este mismo mensaje, dentro del bloque "=== EXPEDIENTE JUDICIAL DIGITAL (MEV - SCBA) ===". Consultalo libremente para extraer cualquier dato que necesites. Usá los encabezados MEV ("Trámite: ...", "Fecha del Escrito: ...") como índice de búsqueda.
 
 `;
 
@@ -259,83 +351,15 @@ El porcentaje de incapacidad para la condena es UNO SOLO: el de "Porcentaje de i
 }
 
 // =============================================================================
-// 1. EXTRACT
+// 1. EXTRACT — versión sin chunks dentro del prompt
 // =============================================================================
 
 export function buildExtractUserPrompt(chunks) {
-  const fullText = chunks.fullText || '';
-  let cuerpoExpediente;
- 
-  if (fullText && fullText.length > 0) {
-    // Estrategia full-text: tres tramos del expediente completo, etiquetados.
-    const tramos = [];
- 
-    // TRAMO 1: arranque del expediente (demanda + contestación + lo que venga)
-    tramos.push(
-      `=== TRAMO 1 — INICIO DEL EXPEDIENTE (demanda y contestación de demanda) ===\n` +
-      fullText.slice(0, 30000)
-    );
- 
-    // TRAMO 2: dictamen pericial. Prefiero chunks.pericia (si existe) porque
-    // está ya identificado por buildChunks; si no, tomo el tramo del medio.
-    if (chunks.pericia && chunks.pericia.length > 200) {
-      tramos.push(
-        `=== TRAMO 2 — DICTAMEN PERICIAL MÉDICO ===\n` +
-        chunks.pericia.slice(0, 8000)
-      );
-    } else if (fullText.length > 30000) {
-      tramos.push(
-        `=== TRAMO 2 — TRAMO MEDIO DEL EXPEDIENTE (probable dictamen pericial) ===\n` +
-        fullText.slice(30000, Math.min(50000, fullText.length))
-      );
-    }
- 
-    // TRAMO 3: final del expediente (impugnaciones, alegatos, autos)
-    if (chunks.final && chunks.final.length > 200) {
-      tramos.push(
-        `=== TRAMO 3 — FINAL DEL EXPEDIENTE (impugnaciones, escritos posteriores) ===\n` +
-        chunks.final.slice(0, 5000)
-      );
-    } else if (fullText.length > 50000) {
-      tramos.push(
-        `=== TRAMO 3 — FINAL DEL EXPEDIENTE ===\n` +
-        fullText.slice(-6000)
-      );
-    }
- 
-    cuerpoExpediente = tramos.join('\n\n');
-  } else {
-    // Fallback sin fullText: combinar chunks individuales con slicing amplio
-    const tramos = [];
-    if (chunks.header) {
-      tramos.push(
-        `=== TRAMO 1 — INICIO DEL EXPEDIENTE ===\n` +
-        chunks.header.slice(0, 16000)
-      );
-      if (chunks.header.length > 16000) {
-        tramos.push(
-          `=== TRAMO 2 — CONTINUACIÓN DEL EXPEDIENTE (probable contestación) ===\n` +
-          chunks.header.slice(16000, 28000)
-        );
-      }
-    }
-    if (chunks.pericia) {
-      tramos.push(
-        `=== TRAMO 3 — DICTAMEN PERICIAL MÉDICO ===\n` +
-        chunks.pericia.slice(0, 8000)
-      );
-    }
-    if (chunks.final) {
-      tramos.push(
-        `=== TRAMO 4 — FINAL DEL EXPEDIENTE ===\n` +
-        chunks.final.slice(0, 4000)
-      );
-    }
-    cuerpoExpediente = tramos.join('\n\n');
-  }
- 
-  return `Del siguiente texto de un expediente JUDICIAL DIGITAL (MEV) del Tribunal del Trabajo N° 5 de Quilmes, extraé exactamente estos datos. Respondé SOLO el JSON, sin texto adicional ni bloques de markdown:
- 
+  // chunks se sigue recibiendo por compatibilidad de firma, pero ya NO se
+  // inyectan tramos del expediente aquí — el expediente completo está en
+  // el bloque cacheado arriba.
+  return `${REGLA_EXPEDIENTE_ARRIBA}TAREA: del expediente judicial digital (MEV) provisto arriba (Tribunal del Trabajo N° 5 de Quilmes), extraé exactamente estos datos. Respondé SOLO el JSON, sin texto adicional ni bloques de markdown:
+
 {
   "causa_numero": "",
   "caratula": "",
@@ -397,73 +421,61 @@ export function buildExtractUserPrompt(chunks) {
   "salario_denunciado": null,
   "fecha_ingreso": ""
 }
- 
+
 # DÓNDE BUSCAR CADA DATO (encabezados MEV característicos)
- 
-Cada presentación del expediente arranca con un encabezado MEV con esta forma:
- 
-    Trámite: [TIPO DE PRESENTACIÓN]
-    Fecha del Escrito: DD/MM/AAAA HH:MM:SS
-    Firmado por: APELLIDO Nombre (CUIT) - [Matricula: TOMO FOLIO]
- 
-Buscá específicamente:
- 
+
 - "Trámite: DEMANDA - SE PRESENTA" → letrado_actor + fecha de demanda. El nombre con su matrícula ("Tº [Romano] Fº [N]") aparece dentro del cuerpo del escrito en el primer párrafo. Colegio: "C.A.L.Z" → CALZ; "C.A.S.I." → CASI; "C.A.Q." → CAQ; "C.A.M." → CAM; "C.A.L.P." → CALP.
- 
+
 - "Trámite: DEMANDA - CONTESTA" → letrado_demandada[0].nombre/tomo/folio/colegio + fecha_contestacion_demanda. El nombre y matrícula aparecen en el primer párrafo de la contestación. La postura de la demandada (síntesis breve de 1-2 oraciones: niega hechos, alega preexistencias, defiende constitucionalidad de LRT, rechaza RIPTE, etc.) va en postura_demandada_resumen.
- 
+
 - "Trámite: DICTAMEN PERICIAL - PRESENTA" → pericia_medica.perito_nombre / perito_matricula / fecha_dictamen. El nombre aparece en el bloque "PROEMIO" o al inicio del dictamen: "Dr./Dra. [NOMBRE], matrícula profesional N° [NÚMERO]". La fecha es la "Fecha del Escrito" del encabezado MEV.
- 
-- "Trámite: IMPUGNA DICTAMEN PERICIAL" → impugnaciones_pericia[].fecha + impugnante (típicamente "demandada"). 
- 
+
+- "Trámite: IMPUGNA DICTAMEN PERICIAL" → impugnaciones_pericia[].fecha + impugnante (típicamente "demandada").
+
 - "Trámite: PERITO - CONTESTA IMPUGNACIÓN" → impugnaciones_pericia[].fecha_contestacion_perito.
- 
+
 - Dictamen de Comisión Médica (Ley 27.348): puede venir mencionado en la documental de la demanda y/o como adjunto en la contestación. Buscá frases como "Dictamen Médico Expte [N°]", "Comisión Médica N° [N°]", "Delegación [LOCALIDAD]", "Disposición de Alcance Particular de Clausura". El expediente SRT tiene formato típico "NNNNNN/AA". Si la CM dictaminó que "no presenta secuelas" o "no presenta incapacidad", poné incapacidad_cm_porcentaje = 0. Si fija un %, ponelo. resultado_cm: una frase corta tipo "Rechazo de incapacidad" o "Reconoce X% de incapacidad".
- 
+
 # TIPO DE ACCIÓN (campo "tipoAccion")
- 
+
 Elegí UNO de estos tres valores exactos:
- 
+
 - "ACCIDENTE": hecho súbito, traumático, único (caída, golpe, atrapamiento, in itinere). Acción directa de la LRT/26.773. Ejemplo: "INICIA DEMANDA POR ACCIDENTE", "Materia: Accidente de trabajo - Acción especial".
- 
+
 - "ENFERMEDAD": cuadro por exposición prolongada o contagio en ocasión de trabajo. COVID-19 = enfermedad profesional para esenciales (DNU 367/2020). Ejemplo: "Materia: Enfermedad profesional", "DNU 367/2020".
- 
+
 - "REVISION_CM": el actor agotó la instancia administrativa ante una Comisión Médica y viene a juicio a REVISAR ese dictamen. Tag CRÍTICO: presencia de las frases "acción de revisión", "ley 15.057", "ley 15057", "revisión de resolución de Comisión Médica", "art. 2 inc. j ley 15.057", "revisión res. comisión médica jurisdiccional" en la carátula, sumario o cuerpo de la demanda.
- 
+
 En "tipo_accion_detectado" copiá la frase literal del expediente. En "tipoAccion" usá uno de los tres tags de arriba.
- 
+
 # DOS PORCENTAJES DISTINTOS — NO LOS CONFUNDAS
- 
+
 **incapacidad_reclamada_demanda**: el porcentaje que el ACTOR reclama en la DEMANDA. Aparece típicamente en frases como "padeciendo por ello una incapacidad que se estima en un X %" o en la liquidación inicial "incapacidad laboral en un X% de la total obrera". También la "incapacidad psicológica del orden del X%". Esto es lo que el actor PIDE, no lo que el tribunal tiene por probado.
- 
+
 **incapacidad_acreditada_pericia**: el porcentaje que el PERITO MÉDICO designado por el tribunal estableció en su dictamen pericial. Aparece en el escrito del perito con frases como "INCAPACIDAD: X% de la T.O.", "BAREMACIÓN", "factores de ponderación". Puede ser muy distinto al reclamado (típicamente menor). Esto es el HECHO PROBADO.
- 
-REGLA: NUNCA copies el % reclamado al campo de acreditado por error. Son DOS NÚMEROS distintos del mismo expediente. Si la pericia no aparece en el texto que te pasaron, dejá los campos de acreditada en null.
- 
+
+REGLA: NUNCA copies el % reclamado al campo de acreditado por error. Son DOS NÚMEROS distintos del mismo expediente. Si la pericia no aparece en el expediente, dejá los campos de acreditada en null.
+
 # PERICIA PSIQUIÁTRICA — ESTRICTO
- 
+
 \`pericia_psiquiatrica.tiene\` solo es **true** si HUBO un perito psicólogo o psiquiatra DESINSACULADO Y DICTAMINANDO en autos, distinto del perito médico legista.
- 
+
 NO indican que haya perito psi:
 - La demanda reclama daño psicológico (el actor lo pide, pero eso no implica que un perito lo haya dictaminado).
 - La demandada se opone a la designación de perito psi (esto es OPOSICIÓN, no hubo perito).
 - El médico legista realiza un examen psíquico básico dentro de su propio dictamen y descarta patología (eso es el legista, NO un perito psi separado).
- 
+
 Si solo intervino el médico legista (aunque haya evaluado lo psíquico), \`pericia_psiquiatrica.tiene\` = **false**.
- 
+
 # REGLAS GENERALES DE EXTRACCIÓN
- 
+
 - LETRADO: tomo (ej "XVI") y folio (ej "42") POR SEPARADO. Colegio: "CAM" (Morón), "CAQ" (Quilmes), "CALP" (La Plata), "CALZ" (Lomas de Zamora), "CASI" (San Isidro).
 - CARÁTULA: en MEV suele venir en el SUMARIO/Observación, formato "ACTOR C/ DEMANDADO S/ MATERIA".
 - denuncia_inconst_ley_23928: true si el actor planteó inconstitucionalidad del art. 7 ley 23.928 o pidió actualización invocando "Barrios".
-- ibm_bruto_afip: si el texto contiene un IBM ya calculado, ponelo; sino null.
+- ibm_bruto_afip: si el expediente contiene un IBM ya calculado, ponelo; sino null.
 - preexistencias_denunciadas: array de objetos {expte, fecha_atep, porcentaje, region_corporal} si la demandada denuncia preexistencias. Sino array vacío.
-- Para valores no encontrados en NINGUNO de los tramos: null (o false/0/"" según el tipo). NO inventes.
-- Respondé SOLO el JSON, sin texto previo ni posterior.
- 
-TEXTO DEL EXPEDIENTE:
- 
-${cuerpoExpediente}`;
+- Para valores no encontrados en NINGUNA parte del expediente provisto arriba: null (o false/0/"" según el tipo). NO inventes.
+- Respondé SOLO el JSON, sin texto previo ni posterior.`;
 }
 
 // =============================================================================
@@ -482,7 +494,6 @@ export function buildAntecedentesUserPrompt(chunks, datos, config) {
     : 'el accidente de trabajo';
 
   const recl = datos?.incapacidad_reclamada_demanda || {};
-  const acr = datos?.incapacidad_acreditada_pericia || {};
 
   const bloqueRevisionCM = esRev ? `
 
@@ -495,10 +506,14 @@ Esto NO es un reclamo directo por accidente/enfermedad — es la REVISIÓN judic
 3. Aclará que el actor, disconforme con ese dictamen, interpone la presente acción de revisión en los términos del art. 2 inc. j ley 15.057.
 ` : '';
 
-  return REGLA_DATOS +
-`TEXTO DEL EXPEDIENTE (demanda, contestación, prueba):
-
-${chunks.header}
+  return REGLA_DATOS + REGLA_EXPEDIENTE_ARRIBA +
+`PALABRAS CLAVE PARA UBICAR DATOS DE ESTA SECCIÓN dentro del expediente provisto arriba:
+- "Trámite: DEMANDA - SE PRESENTA" (datos del actor, letrado actor, descripción del hecho, monto reclamado)
+- "Trámite: DEMANDA - CONTESTA" (datos del letrado demandada, postura, preexistencias)
+- "Auto de apertura a prueba" (fecha del auto)
+- "Trámite: DICTAMEN PERICIAL - PRESENTA" (solo para mencionar QUE el perito presentó dictamen — el contenido va en otra sección)
+- "Trámite: IMPUGNA" / "Trámite: PERITO - CONTESTA IMPUGNACIÓN" (fechas de impugnaciones y respuestas)
+- "Trámite: ALEGATO" (mención de alegatos, si los hay)
 
 DATOS YA EXTRAÍDOS (fuente PRIMARIA — usalos directamente):
 
@@ -551,7 +566,7 @@ NO uses "a fs. X". Usá:
 
 # OMISIONES Y MARCADORES
 
-Si un dato estructuralmente necesario no figura en NINGUNA fuente, escribí literal "[FALTA: descripción]". NUNCA "se desprende que..." ni "puede inferirse que...".
+Si un dato estructuralmente necesario no figura en NINGUNA fuente del expediente, escribí literal "[FALTA: descripción]". NUNCA "se desprende que..." ni "puede inferirse que...".
 
 # FORMATO
 
@@ -607,14 +622,16 @@ El cierre de la Resolución en este caso es: "En consecuencia, corresponde refor
 - Si el actor reclamó daño psicológico pero ningún perito lo dictaminó, NO atribuyas % psíquico al perito. Podés mencionar que el reclamo psíquico no fue objeto de prueba pericial específica.
 `;
 
-  return REGLA_DATOS +
-`TEXTO DEL EXPEDIENTE - DICTAMEN PERICIAL MÉDICO:
-
-${chunks.pericia}
-
-CONTEXTO - INICIO DEL EXPEDIENTE:
-
-${chunks.header.slice(0, 4000)}
+  return REGLA_DATOS + REGLA_EXPEDIENTE_ARRIBA +
+`PALABRAS CLAVE PARA UBICAR LA PERICIA dentro del expediente provisto arriba:
+- "Trámite: DICTAMEN PERICIAL - PRESENTA" (encabezado MEV del dictamen)
+- "I- PROEMIO" / "I.- PROEMIO" (apertura típica del dictamen)
+- "antecedentes de interés médico legal"
+- "examen médico-pericial" / "practicó el examen"
+- "BAREMACIÓN" / "factores de ponderación"
+- "INCAPACIDAD" / "% de la T.O."
+- Signos clínicos específicos a transcribir si aparecen: Tinel, Phalen, bostezo articular, cajón anterior, Lasègue, hipotrofia cuadricipital, escala de Beck, escala de Hamilton, grados de flexión/extensión
+- "Trámite: IMPUGNA DICTAMEN PERICIAL" + "Trámite: PERITO - CONTESTA IMPUGNACIÓN" (para la sección de impugnaciones)
 
 DATOS YA EXTRAÍDOS:
 
@@ -678,15 +695,15 @@ ${(datos?.preexistencias_denunciadas?.length || 0) > 0
 ${bloqueRevisionCM}
 
 # FORMATO DEL OUTPUT (CRÍTICO)
- 
+
 Tu PRIMER carácter de output es la 'R' de "Resolución:". No agregues ningún encabezado, ningún número romano, ni el nombre de un juez antes.
- 
+
 NO incluyas:
 - IBM, edad del trabajador, salarios mensuales (eso va en una sección aparte).
 - "Así lo voto" o "(art. 57 inc. 4 ley 15.057)" (eso va en una sección aparte).
 - Encabezados de cuestión, "PRIMERA CUESTIÓN", "SEGUNDA CUESTIÓN", etc.
 - Headers Markdown ("#", "##", "###") en cualquier parte de tu output.
- 
+
 Tu output completo debe caber holgadamente en una sola respuesta. Si tu redacción se está volviendo extensa, prioritzá la conclusión: el dictamen del perito, los porcentajes, las preexistencias (si las hay), y el cierre que cierra la cuestión. Mejor ser conciso y llegar al cierre, que extenderse y truncarse.`;
 }
 
@@ -699,14 +716,14 @@ export function buildIbmUserPrompt(chunks, datos, config, calculos) {
   const esEnf = tipo === 'ENFERMEDAD';
   const terminoFecha = esEnf ? 'la fecha de primera manifestación invalidante' : 'la fecha del accidente';
 
-  return REGLA_DATOS +
-`TEXTO DEL EXPEDIENTE - SECCIÓN AFIP/RIPTE/IBM:
-
-${chunks.afip}
-
-CONTEXTO - INICIO:
-
-${chunks.header.slice(0, 3000)}
+  return REGLA_DATOS + REGLA_EXPEDIENTE_ARRIBA +
+`PALABRAS CLAVE PARA UBICAR DATOS DE AFIP/IBM/RIPTE dentro del expediente provisto arriba:
+- "remuneraciones informadas por AFIP"
+- "RIPTE", "V.I.B. (RIPTE)"
+- "salario actualizado" / "salarios actualizados"
+- "valor ingreso base" / "ingreso base mensual"
+- "202103", "202401", etc. (códigos de período YYYYMM)
+- En adjuntos: planillas con cabeceras de "Período / Bruto / Actualizado"
 
 DATOS:
 
@@ -746,22 +763,22 @@ Insertá literalmente:
 "Así lo voto (art. 57 inc. 4 ley 15.057)."
 
 # FORMATO DEL OUTPUT (CRÍTICO)
- 
-Tu PRIMER carácter de output debe ser la 'A' de la frase "A fin de determinar el ingreso base mensual, tendré en consideración el promedio mensual...". 
- 
+
+Tu PRIMER carácter de output debe ser la 'A' de la frase "A fin de determinar el ingreso base mensual, tendré en consideración el promedio mensual...".
+
 PROHIBIDO antes de esa frase:
 - Cualquier encabezado: "PRIMERA CUESTIÓN", "INGRESO BASE MENSUAL", "VIII.- ...", "IBM", etc.
 - Cualquier nombre de juez ("El Dr. X dijo:", "DIJO:", etc.).
 - Numeración romana (VIII, IX, X) ni numeración arábiga ("1.", "2.").
 - Headers Markdown ("#", "##", "###") en cualquier parte de tu output.
- 
+
 # CONTENIDO
- 
+
 - NO incluyas la indemnización ni la comparación RIPTE — eso va en la Segunda Cuestión.
 - NO incluyas adhesiones.
 - Terminá con "Así lo voto (art. 57 inc. 4 ley 15.057)." y nada más después.`;
 }
- 
+
 // =============================================================================
 // 5. SEGUNDA CUESTIÓN
 // =============================================================================
@@ -791,14 +808,11 @@ export function buildSegundaUserPrompt(chunks, datos, config, calculos) {
 
 "La parte actora solicita la declaración de inconstitucionalidad de la ley 24.432 y la parte demandada solicita su aplicación: De acuerdo a la doctrina legal de la SCBA (causas L. 77.914, 'Zuccoli', sent. de 2-X-2002; L. 119.955, 'Duarte', sent. de 14-VIII-2019; L. 121.989, 'Mosiejchuk', sent. de 26-XII-2019; e.o.), se desestima la petición formulada por la parte actora (SCBA causas L. 93.064, 'Vas da Silva', sent. de 2-III-2011; L. 112.832, 'G., D. H.', sent. de 2-V-2013; L. 117.427, 'Caraballo', sent. de 20-V-2015; L. 118.434, 'Virgili', sent. de 12-IV-2017 y L. 125.474, 'Magyar', sent. de 31-VIII-2022; entre otras)."` : '';
 
-  return REGLA_DATOS +
-`TEXTO DEL EXPEDIENTE - SECCIONES AFIP Y ALEGATOS:
-
-${chunks.afip.slice(0, 8000)}
-
---- ALEGATOS ---
-
-${chunks.alegatos}
+  return REGLA_DATOS + REGLA_EXPEDIENTE_ARRIBA +
+`PALABRAS CLAVE PARA UBICAR DATOS DE ESTA SECCIÓN dentro del expediente provisto arriba:
+- AFIP / RIPTE / IBM: "remuneraciones informadas por AFIP", "ingreso base mensual", "RIPTE"
+- ALEGATOS: "Trámite: ALEGATO - PRESENTA", "presenta alegato", "ha quedado probado"
+- PLANTEOS CONSTITUCIONALES: "inconstitucionalidad", "art. 12 LRT", "art. 7 ley 23.928"
 
 DATOS:
 
@@ -902,16 +916,8 @@ export function buildSentenciaUserPrompt(chunks, datos, config, calculos) {
     ? `"Hacer lugar a la acción de revisión interpuesta por [NOMBRE ACTOR del JSON] contra [DEMANDADA del JSON], reformando el dictamen de la Comisión Médica N° [N° CM del JSON] de fecha [FECHA del JSON] y declarando que el actor es portador de una incapacidad psicofísica parcial y permanente del [% acreditado] de la T.O. por el hecho denunciado, condenando a [DEMANDADA del JSON] a abonar la suma de [TOTAL EN LETRAS] ([TOTAL EN PESOS]) en el plazo de diez (10) días de quedar firme el presente pronunciamiento (${artsCondena})."`
     : null;
 
-  return REGLA_DATOS +
-`CONTEXTO - DATOS BÁSICOS:
-
-${chunks.header.slice(0, 5000)}
-
---- FINAL DEL EXPEDIENTE ---
-
-${chunks.final}
-
-DATOS:
+  return REGLA_DATOS + REGLA_EXPEDIENTE_ARRIBA +
+`DATOS:
 
 ${JSON.stringify(datos, null, 2)}
 ${bloqueValoresPrecalculados(calculos, config, datos)}
@@ -988,23 +994,23 @@ ${haceLugar ? `
 "REGISTRESE, NOTIFIQUESE, con transcripción de lo dispuesto en el art. 54 Ley 14.967 y oportunamente ARCHIVESE."
 
 # FORMATO DEL OUTPUT (CRÍTICO)
- 
-Tu PRIMER carácter de output debe ser el "1" del inciso "1°)". 
- 
+
+Tu PRIMER carácter de output debe ser el "1" del inciso "1°)".
+
 PROHIBIDO antes del primer inciso:
 - Encabezados: "SENTENCIA DISPOSITIVO", "SENTENCIA", "R E S U E L V E:", "R E S U E L V E", "RESUELVE".
 - Preámbulos: "Por ello, atento a las normas constitucionales...", "VISTOS", "AUTOS Y VISTOS", "Considerando".
 - Headers Markdown ("#", "##", "###") en cualquier parte de tu output.
- 
+
 El sistema ya agrega por código los encabezados "S E N T E N C I A" y "R E S U E L V E:" en el lugar correcto. Vos solo escribís los incisos numerados.
- 
+
 # CONTENIDO
- 
+
 - Numerá los incisos como aparecen arriba.
 - ${esEnf ? 'ENFERMEDAD: NO cites art. 3 ley 26.773 en el inciso 2°.' : esRev ? 'REVISIÓN CM: citá art. 2 inc. j ley 15.057 en la condena principal.' : 'ACCIDENTE: SÍ citá art. 3 ley 26.773.'}
 - Si rechaza la demanda: omití CBU, intereses por mora, instrucciones de pago de honorarios.`;
 }
- 
+
 // =============================================================================
 // ADHESIONES (texto fijo, sin cambios)
 // =============================================================================
@@ -1049,19 +1055,17 @@ export function detectarVarianteWeiss(calculos, datos) {
   if (datos?.denuncia_inconst_ley_23928) return 1;
   return 2;
 }
+
 // =============================================================================
 // ENCABEZADO OFICIAL DE LA SENTENCIA (entre Acuerdo y dispositivo)
 // =============================================================================
-//
-// Texto fijo del tribunal. No pasa por el LLM, se concatena por código.
-// La variable es "por mayoría" vs "por unanimidad" según cómo vota Weiss.
- 
+
 export function buildEncabezadoSentencia(varianteWeiss) {
   // varianteWeiss: 1 → discrepa con fundamento (caso "Barrios")
   //                2 → adhiere dejando a salvo criterio del TT4
   //                3 → adhiere sin reservas (típicamente cuando se rechaza la demanda)
   const formula = varianteWeiss === 3 ? 'por unanimidad' : 'por mayoría';
   return `**SENTENCIA**
- 
+
 AUTOS Y VISTOS: CONSIDERANDO: Lo decidido en el Acuerdo que antecede y los fundamentos que lo sustentan, el Tribunal ${formula} RESUELVE:`;
 }
