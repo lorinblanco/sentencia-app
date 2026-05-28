@@ -543,12 +543,12 @@ export async function generateSection(
   // (transcribe pericia + impugnación + respuesta perito) — necesita 8000.
   // Segunda incluye razonamiento constitucional + comparativa numérica.
   const MAX_TOKENS_BY_SECTION = {
-    antecedentes: 6000,
-    resolucion: 8000,
-    ibm: 5000,
-    segunda: 7000,
-    sentencia: 5500,
-  }
+  antecedentes: 3500,
+  resolucion: 5000,
+  ibm: 4000,
+  segunda: 5500,
+  sentencia: 4500,
+}
   const maxTokens = MAX_TOKENS_BY_SECTION[sectionType] || 4000
   const text = await callClaude(apiKey, userPrompt, maxTokens, onChunk)
 
