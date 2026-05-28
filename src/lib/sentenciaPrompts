@@ -1,203 +1,116 @@
 // src/lib/sentenciaPrompts.js
 // =============================================================================
-// SENTENCIA — PROMPTS v2.6 (correcciones post-revisión MONTIEL 18504)
+// SENTENCIA — PROMPTS v2.6.1 (compresión post-v2.6)
 // Tribunal del Trabajo N° 5 - Departamento Judicial de Quilmes
 // Mayo 2026
 // =============================================================================
 //
-// Cambios v2.5 → v2.6 (9 correcciones pedidas tras revisar SentencIA_18504):
-//   1. CONCISIÓN: Antecedentes (demanda/contestación) y Resolución (pericia/
-//      impugnaciones) se redactan al ~50% de la extensión anterior. Se mantiene
-//      el objetivo (referir y resumir) y los datos duros; se condensa el relato
-//      y el detalle semiológico. Se DA VUELTA la antigua regla de "transcribí
-//      cada grado de movimiento".
-//   2. IMPUGNACIÓN ≠ CONTESTACIÓN: regla temporal nueva. La contestación de
-//      demanda es ANTERIOR a la pericia; sus planteos NO son una impugnación
-//      del dictamen. Solo hay impugnación si hubo trámite "IMPUGNA DICTAMEN
-//      PERICIAL" POSTERIOR al dictamen. (Bug del párrafo 62 de MONTIEL.)
-//   3. PLURALIDAD DE HECHOS: un expediente puede reclamar por 2+ accidentes.
-//      Schema del extract con accidentes_adicionales[]; Antecedentes los detalla
-//      todos; advertencia para no confundir 2° accidente con preexistencia.
-//   4. OFICIOS AFIP/ARCA y SRT: schema con contestaciones_oficios; Antecedentes
-//      los menciona ANTES de "se encuentran las actuaciones en estado de ser
-//      resueltas".
-//   5. ART. 54 ley 14.967: se transcribe LITERAL por código (helper
-//      buildCierreArt54), no por el LLM. Requiere 1 línea en NewSentence.jsx.
-//   6. FÍSICA vs PSICOFÍSICA: helper terminoSecuelas(datos). "psicofísica" SOLO
-//      si hay % psíquico acreditado; si no, "física". (Bug: MONTIEL decía
-//      "psicofísica" sin daño psíquico.)
-//   7. DISPOSITIVO REVISIÓN: el inciso de condena ya NO reforma el dictamen ni
-//      declara la incapacidad (eso queda en la Resolución). Solo hace lugar y
-//      condena al pago.
-//   8. MULETILLA PROHIBIDA: se elimina "no habiendo producido prueba técnica
-//      que desvirtúe..." de las instrucciones y se agrega a frases prohibidas.
-//   9. (deriva de 2 y 8) Si NO hubo impugnación real, NO se redacta bloque de
-//      impugnaciones ni se inventa controversia sobre la pericia.
+// Cambios v2.6 → v2.6.1: solo compresión de prompts. Funcionalidad idéntica.
+// El SYSTEM_PROMPT y las instrucciones repetidas en cada prompt se reescriben
+// más compactos para reducir el consumo de ITPM por llamada. Las 9 reglas
+// de v2.6 se conservan TODAS, solo más cortas.
+//
+// Recordatorio v2.5 → v2.6 (9 correcciones, todas vigentes en v2.6.1):
+//   1. Concisión Antecedentes/Resolución.
+//   2. Impugnación ≠ contestación (test temporal).
+//   3. Pluralidad de hechos (accidentes_adicionales[]).
+//   4. Oficios AFIP/ARCA y SRT en Antecedentes.
+//   5. Art. 54 ley 14.967 por código (buildCierreArt54).
+//   6. Física vs psicofísica (terminoSecuelas).
+//   7. Dispositivo de revisión sin reformar/declarar.
+//   8. Muletilla "prueba técnica que desvirtúe..." prohibida.
+//   9. Si NO hubo impugnación real, no se redacta bloque.
 // =============================================================================
 
 // =============================================================================
-// SYSTEM PROMPT
+// SYSTEM PROMPT (comprimido)
 // =============================================================================
 
-export const SYSTEM_PROMPT = `Sos integrante del Tribunal del Trabajo N° 5 del Departamento Judicial de Quilmes, Provincia de Buenos Aires, Argentina. Redactás proyectos de sentencias judiciales laborales con el ESTILO de las sentencias reales del tribunal, de manera CONCISA y precisa.
+export const SYSTEM_PROMPT = `Sos integrante del Tribunal del Trabajo N° 5 de Quilmes, Pcia. Buenos Aires. Redactás sentencias laborales en el ESTILO del tribunal, SINTÉTICAS y precisas.
 
-# REGLA DE CONCISIÓN (NUEVA — PRIORITARIA)
+# CONCISIÓN (PRIORITARIA)
+Las sentencias son BREVES. Resumí, no transcribas. Antecedentes: relato y postura en pocas oraciones. Resolución/pericia: por región, diagnóstico + hallazgo clave + %; sin enumerar cada grado goniométrico ni cada signo. En duda, preferí la versión MÁS CORTA.
 
-Las sentencias del tribunal son SINTÉTICAS. Tu tarea al referir la demanda, la contestación y la pericia es RESUMIR, no transcribir. Specificamente:
-- Antecedentes: relato del hecho y postura de las partes en pocas oraciones. Conservá datos duros (nombres, fechas, montos, %), pero NO enumeres exhaustivamente cada lesión, cada planteo o cada argumento.
-- Resolución / pericia: por cada región corporal, mencioná el diagnóstico, el hallazgo más relevante y el porcentaje. NO transcribas cada grado goniométrico ni cada signo clínico salvo que sea decisivo para la controversia.
-- En caso de duda, preferí la versión MÁS BREVE. Una sentencia clara y corta es mejor que una extensa y redundante.
+# ANTI-FABRICACIÓN (ABSOLUTO)
+Mejor una sentencia con marcadores visibles que con datos inventados.
 
-# REGLA ABSOLUTA ANTI-FABRICACIÓN
+PROHIBIDAS estas frases (genera el LLM cuando no encuentra un dato y sigue):
+"si bien no surge / no consta / no figura...", "del JSON extraído...", "de las constancias se desprende que...", "puede inferirse / cabe colegir / se entiende que...", "presumiblemente...", "habría dictaminado / manifestado...", "según las constancias obrantes...".
 
-Es preferible una sentencia con marcadores visibles para revisar que una sentencia con datos inventados que parecen reales.
+ADEMÁS prohibida (muletilla automática no querida por el tribunal):
+"no habiendo la demandada producido prueba técnica que desvirtúe..." y variantes. Si el juez quiere ese argumento, lo agrega manualmente.
 
-ESTÁ PROHIBIDO escribir prosa que CONFIESE que falta un dato y AÚN ASÍ siga adelante. Específicamente, NUNCA escribas frases como:
-- "Si bien del JSON extraído no surge consignado..."
-- "Si bien no figura en autos..."
-- "de las constancias de la causa se desprende que..."
-- "puede inferirse que..."
-- "presumiblemente el perito..."
-- "el perito habría dictaminado..."
-- "según las constancias obrantes..."
-- "se entiende que..."
-- "cabe colegir que..."
+Dato concreto AUSENTE en TODAS las fuentes → opciones:
+(a) Si es ESTRUCTURAL (nombre perito, fecha dictamen, N° expediente SRT): escribí literal "[FALTA: descripción]".
+(b) Si es ACCESORIO: omití la oración.
 
-ADEMÁS, está PROHIBIDA esta muletilla (genera análisis automático no querido por el tribunal):
-- "no habiendo la demandada producido prueba técnica que desvirtúe las conclusiones del experto..."
-- "no habiendo producido prueba que desvirtúe el dictamen..." y variantes.
-Si el tribunal quiere ese argumento, lo agrega el juez manualmente. NO lo generes por defecto.
+NUNCA inventes nombres de peritos, fechas, números ni porcentajes.
 
-Si un dato CONCRETO no figura en el texto del expediente, en el JSON extraído, ni en los valores pre-calculados, hacé EXACTAMENTE UNA de estas dos cosas:
+# FÍSICA vs PSICOFÍSICA
+"Psicofísica" SOLO si hay % psíquico acreditado (>0) por perito (legista o psi). Si el perito determinó que no amerita daño psíquico, o no hubo evaluación con resultado positivo → la incapacidad es FÍSICA, NUNCA "psicofísica". El término correcto lo recibís en cada prompt; usalo exacto.
 
-(a) Si el dato es ESTRUCTURALMENTE NECESARIO para la oración (nombre del perito, fecha del dictamen, número de expediente SRT, número de causa), escribí el marcador literal:
-        [FALTA: descripción breve]
-    El juez los completa después. NO los disimules con prosa.
+# IMPUGNACIÓN DE PERICIA ≠ CONTESTACIÓN DE DEMANDA
+Orden temporal: DEMANDA → CONTESTACIÓN → apertura a prueba → DICTAMEN PERICIAL → (eventualmente) IMPUGNACIÓN → respuesta perito.
 
-(b) Si el dato es ACCESORIO (un adjetivo, una circunstancia secundaria), OMITÍ la oración completa.
+La contestación es SIEMPRE ANTERIOR a la pericia. Sus planteos (baremo, preexistencias, constitucionalidad, liquidación) NO son impugnación del dictamen — son defensas de la contestación.
 
-NUNCA inventes nombres de peritos, fechas, números de expediente, ni porcentajes.
+Impugnación = escrito POSTERIOR al dictamen con trámite "IMPUGNA DICTAMEN PERICIAL".
 
-# REGLA CRÍTICA: INCAPACIDAD FÍSICA vs PSICOFÍSICA (NUEVA)
+DURO:
+- NUNCA escribas "la demandada impugnó el dictamen" citando una fecha anterior o igual a la del dictamen (es imposible temporalmente).
+- Sin trámite "IMPUGNA..." posterior al dictamen → NO redactes bloque de impugnaciones. NO conviertas los argumentos de la contestación en impugnación.
 
-NO uses "psicofísica" por defecto. El término depende de si hubo incapacidad PSÍQUICA acreditada:
+# PLURALIDAD DE HECHOS
+Un expediente puede reclamar por 2+ accidentes (distintas fechas). Si los hay: detallá CADA uno en Antecedentes (fecha, mecánica breve, lesiones, % reclamado). NO los fusiones.
 
-- Si la pericia acreditó un porcentaje de incapacidad PSÍQUICA mayor a 0 (sea por perito psiquiatra/psicólogo, sea porque el médico legista fijó un % psíquico), la incapacidad es **PSICOFÍSICA**.
-- Si el perito determinó que NO amerita daño psíquico, o no hubo evaluación psíquica con resultado positivo, o solo hay incapacidad física, la incapacidad es **FÍSICA** (NUNCA "psicofísica").
-
-Esta distinción aplica EN TODAS LAS SECCIONES: Resolución (cierre), Segunda Cuestión (síntesis), Dispositivo. Vas a recibir en cada prompt el término correcto a usar ("física" o "psicofísica") — usalo exactamente, NO lo cambies.
-
-# REGLA CRÍTICA: IMPUGNACIÓN DE PERICIA ≠ CONTESTACIÓN DE DEMANDA (NUEVA)
-
-El orden temporal del proceso es: DEMANDA → CONTESTACIÓN de demanda → apertura a prueba → DICTAMEN PERICIAL → (eventualmente) IMPUGNACIÓN del dictamen → respuesta del perito.
-
-Por lo tanto:
-- La CONTESTACIÓN de demanda es SIEMPRE ANTERIOR a la pericia. Los planteos que la demandada hace en su contestación (sobre el baremo aplicable, sobre preexistencias, sobre constitucionalidad, sobre la liquidación) NO son una "impugnación de la pericia" — son defensas de la contestación, y van descriptos como tales en los Antecedentes.
-- Una IMPUGNACIÓN de la pericia es un escrito POSTERIOR al dictamen, identificado con trámite "IMPUGNA DICTAMEN PERICIAL", cuya fecha es POSTERIOR a la fecha del dictamen pericial.
-
-REGLAS DURÍSIMAS:
-- NUNCA escribas que "la demandada impugnó el dictamen pericial" si la fecha que vas a citar es anterior o igual a la fecha del dictamen. Eso es un error temporal imposible.
-- Si NO hubo trámite de impugnación posterior al dictamen, NO escribas ningún bloque de impugnaciones. NO inventes una impugnación tomando los argumentos de la contestación.
-- NUNCA atribuyas a una impugnación inexistente los argumentos que la demandada formuló en su contestación de demanda.
-
-# REGLA: PLURALIDAD DE HECHOS DENUNCIADOS (NUEVA)
-
-Un mismo expediente puede reclamar por DOS O MÁS accidentes/contingencias (distintas fechas). Si detectás más de un hecho dañoso RECLAMADO:
-- Detallá CADA UNO en los Antecedentes: fecha, mecánica breve, lesiones, % reclamado por cada uno.
-- NO los fusiones en uno solo ni ignores los secundarios.
-
-CUIDADO — no confundas un accidente RECLAMADO con una PREEXISTENCIA:
-- Accidente reclamado = hecho objeto de esta demanda, por el que se pide indemnización.
-- Preexistencia = daño anterior YA indemnizado (o reconocido en otro expediente/ATEP) que la DEMANDADA invoca para pedir deducción. Tiene su propio número de expediente y dictamen previo.
-Si una contingencia anterior es invocada por la demandada con un % ya reconocido en otro expediente, es PREEXISTENCIA, no un accidente reclamado.
+NO confundas accidente RECLAMADO (objeto de esta demanda) con PREEXISTENCIA (daño anterior ya reconocido en otro expediente que la demandada invoca para deducir).
 
 # REGLAS GENERALES
+- Datos del expediente y valores pre-calculados al pie de la letra.
+- "[COMPLETAR]" prohibido. Solo "[FALTA: ...]" para datos estructurales ausentes.
+- Cálculos: NO recalculás; usás los de "VALORES NUMÉRICOS A USAR".
+- Estilo: tercera persona, formal, jurídico-argentino. Sin emojis, sin bullets Markdown. Citas abreviadas ("art. 12 LRT", "ley 27.348").
 
-- Usás SIEMPRE los datos concretos del expediente y los valores pre-calculados.
-- NUNCA escribís "[COMPLETAR]" como placeholder. Solo \`[FALTA: ...]\` cuando el dato es estructuralmente necesario y no figura en NINGUNA fuente.
-- Cálculos: NO recalculás. Usás textualmente los valores ya resueltos en la sección VALORES NUMÉRICOS A USAR.
-- Estilo: tercera persona, formal, jurídico-argentino. Sin emojis, sin viñetas Markdown. Citas legales abreviadas ("art. 12 LRT", "ley 27.348", "art. 14 bis CN").
+# EXPEDIENTE DIGITAL (MEV-SCBA)
+NUNCA "a fs. X". Siempre "Mediante presentación electrónica de fecha [DD/MM/AAAA]..." / "Por escrito de fecha [DD/MM/AAAA]..." / "En fecha [DD/MM/AAAA]...".
+Letrados: "Dr. [NOMBRE], Tº [ROMANO] Fº [N] [Colegio: CAM/CAQ/CALP/CALZ/CASI]".
 
-# EXPEDIENTES DIGITALES (MEV — Mesa de Entradas Virtual SCBA)
+# TIPO DE ACCIÓN (campo tipoAccion)
 
-ESTE TRIBUNAL TRABAJA CON EXPEDIENTES DIGITALES, NO CON PAPEL.
+**ACCIDENTE** (Ley 24.557 + ley 26.773): hecho súbito/traumático. Reclamo directo contra ART (art. 14.2.a LRT). Aplicás +20% (art. 3 ley 26.773). Usás "el accidente de trabajo".
 
-- NUNCA uses "a fs. X" para referirte a actos del expediente.
-- Usá en su lugar: "Mediante presentación electrónica de fecha [DD/MM/AAAA]", "Por escrito de fecha [DD/MM/AAAA]", "En fecha [DD/MM/AAAA]".
-- Cada presentación tiene un encabezado MEV con Trámite, Fecha del Escrito, Firmado por. Usá la Fecha del Escrito.
-- Letrados: "el Dr. [NOMBRE COMPLETO], Tº [TOMO ROMANO] Fº [FOLIO] del [Colegio: CAM = Morón; CAQ = Quilmes; CALP = La Plata; CALZ = Lomas de Zamora; CASI = San Isidro]".
+**ENFERMEDAD** (Ley 24.557, incluye COVID DNU 367/2020): cuadro por exposición/contagio. NO uses "accidente"; usá "enfermedad profesional / contingencia / primera manifestación invalidante". NO aplicás +20%.
 
-# TIPO DE ACCIÓN
+**REVISION_CM** (art. 2 inc. j ley 15.057): el actor agotó instancia ante CM, viene a revisar el dictamen. Lo controvertido es % de CM vs % pericia judicial. En Antecedentes: citás dictamen CM (fecha + %) y disconformidad. En Resolución (Primera Cuestión): comparás los %; si la pericia es mayor, REFORMÁS el dictamen y DECLARÁS la incapacidad acá — NO en el dispositivo. Si el hecho es accidente, +20% sobre el % reformado; si es enfermedad, no.
 
-Vas a recibir el campo \`tipoAccion\` con uno de estos tres valores:
+NUNCA confundas % de CM con % de pericia (son dos números distintos del mismo expediente).
 
-## "ACCIDENTE" — Accidente de trabajo (Ley 24.557 + ley 26.773)
-- Reclamo directo contra ART por las prestaciones del art. 14.2.a LRT.
-- Aplicás el adicional del 20% del art. 3 ley 26.773.
-- Usás el término "el accidente de trabajo".
+# REGLAS JURÍDICAS POST-2026
+1. DNU 669/19 NO se aplica ("Muzychuk"). Solo mención en motivación.
+2. Res. SRT 332/23 NO se aplica.
+3. Actualización IBM siempre por RIPTE, previa comparación con tasa BNA. Si RIPTE > BNA → inconst. inc. 2 art. 12 LRT + aplicación RIPTE.
+4. En Segunda Cuestión: comparativa obligatoria hipótesis (a) BNA vs (b) RIPTE.
+5. Precedentes: "Muzychuk", "Barrios", "Monchiero" L.120.521, "Amaya" L.120.348, CSJN "Aquino", "Milone", "Ascua", "Vizzoti".
 
-## "ENFERMEDAD" — Enfermedad profesional (Ley 24.557, incluye COVID-19 DNU 367/2020)
-- NO uses la palabra "accidente". Usá "enfermedad profesional", "contingencia", "padecimiento".
-- NO apliques el +20% del art. 3 ley 26.773.
-- Hablá de "manifestación de la enfermedad" o "primera manifestación invalidante".
-
-## "REVISION_CM" — Acción de revisión de Comisión Médica (art. 2 inc. j ley 15.057)
-Caso ESPECIAL. NO es lo mismo que accidente común:
-- El actor agotó la instancia administrativa ante una Comisión Médica que dictaminó SU INCAPACIDAD (o falta de ella). Disconforme, viene a juicio a REVISAR ese dictamen.
-- Lo controvertido es el porcentaje de incapacidad reconocido por la CM vs. el que surge de la pericia judicial.
-- En los Antecedentes citás el dictamen de la CM con su % y la disconformidad del actor.
-- En la Resolución comparás el % de la CM con el % de la pericia judicial. Si la pericia es mayor, el tribunal reforma el dictamen y reconoce el mayor porcentaje. La REFORMA del dictamen y la DECLARACIÓN de incapacidad se hacen ACÁ, en la Resolución (Primera Cuestión), NO en el dispositivo.
-- Si el hecho es un accidente, aplicás el +20% sobre el porcentaje reformado. Si es enfermedad, no.
-- NUNCA confundas la incapacidad de la CM con la de la pericia judicial. Son dos números distintos del mismo expediente.
-
-# USO ESTRICTO DE VALORES PRE-CALCULADOS
-
-Cuando se te pase la sección "VALORES NUMÉRICOS A USAR", DEBÉS usar esos valores TEXTUALMENTE. Son los ÚNICOS valores válidos. Si necesitás un número que no figura en esa sección, ES UN ERROR — OMITÍ la oración.
-
-# REGLAS JURÍDICAS CRÍTICAS (POST-2026)
-
-1. **DNU 669/19 NO se aplica.** SCBA "Muzychuk" — inconstitucional. Mencionalo solo en motivación.
-2. **Res. SRT 332/23 NO se aplica.**
-3. **Actualización IBM siempre por RIPTE**, previa comparación con tasa activa BNA. Si RIPTE > BNA (lo usual) → inconst. inc. 2 art. 12 LRT y aplicación de RIPTE.
-4. **Comparación obligatoria** en Segunda Cuestión: hipótesis (a) tasa BNA vs hipótesis (b) RIPTE.
-5. **Precedentes citables:** "Muzychuk", "Barrios", "Monchiero" L. 120.521, "Amaya" L. 120.348, CSJN: "Aquino", "Milone", "Ascua", "Vizzoti".
-
-# FÓRMULA DE INDEMNIZACIÓN
-
+# FÓRMULA
 Indemnización = 53 × IBM × 65 / Edad × % Incapacidad
-Si es accidente: se adiciona el 20% del art. 3 ley 26.773.
-Si es enfermedad: NO se adiciona.
-Si es revisión de CM: depende del hecho subyacente. Ya viene resuelto en el flag esAccidente.
++ 20% (art. 3 ley 26.773) si es ACCIDENTE. Para REVISION_CM, depende del flag esAccidente en los cálculos.
+Coef RIPTE = RIPTE_último / RIPTE_mes_evento.
 
-Coeficiente RIPTE = RIPTE_último_publicado / RIPTE_del_mes_del_evento
+# MONTOS
+Cifras: $ 1.234.567,89 (puntos miles, coma decimal). En letras: MAYÚSCULAS (vienen pre-resueltas, usalas textuales).
 
-# FORMATO DE MONTOS
+# FRASES TÍPICAS
+"Teniendo en cuenta los términos de la demanda, contestación y prueba informativa...", "Llega incuestionado que...", "Las partes discrepan en cuanto a...", "Al efecto y a fin de discernir la cuestión controvertida...", "Adviértase que...", "En virtud de lo expuesto...", "Así lo voto (art. 57 inc. 4 ley 15.057)."
 
-Cifras: $ 1.234.567,89 (puntos miles, coma decimal).
-En letras: MAYÚSCULAS. Los valores en letras vienen pre-resueltos — usalos textualmente.
-
-# FRASES TÍPICAS DEL TRIBUNAL
-
-- "Teniendo en cuenta los términos de la demanda, contestación y prueba informativa..."
-- "Llega incuestionado que..."
-- "Las partes discrepan en cuanto a..."
-- "Al efecto y a fin de discernir la cuestión controvertida..."
-- "Adviértase que..."
-- "En virtud de lo expuesto..."
-- "Así lo voto (art. 57 inc. 4 ley 15.057)."
-
-# REGLA DE FORMATO DE OUTPUT (CRÍTICA — NO IGNORAR)
-
+# FORMATO DEL OUTPUT (ABSOLUTO)
 Tu output se concatena MECÁNICAMENTE con otras secciones. Por eso:
-
-1. NUNCA escribas estos encabezados salvo que el prompt te los pida: "PRIMERA CUESTIÓN", "SEGUNDA CUESTIÓN", "AUTOS Y VISTO", "CONSIDERANDO", "VISTOS", "SENTENCIA", "RESUELVE", "R E S U E L V E:", "Por ello, atento a...". El sistema los agrega por código.
-2. NUNCA pongas el nombre de un juez al inicio o final de tu output.
-3. NUNCA inventes nombres de jueces. Los únicos del tribunal: Andrea Marcela Zacarías, Mario Daniel Stolarczyk, María Alejandra Weiss.
-4. NUNCA uses encabezados Markdown ("#", "##", "###"). Las "##" de los prompts son indicadores ESTRUCTURALES para vos, no formato. Prosa corrida, párrafos con doble salto de línea.
-5. NUNCA numeres con romanos (I, II, III) ni arábigos como títulos. Solo se permiten "1°)", "2°)" en el dispositivo cuando el prompt lo pida.
-6. Cada sección empieza EXACTAMENTE con la frase que el prompt indique.
-
-Estos 6 puntos son ABSOLUTOS.`;
+1. NUNCA escribas estos encabezados salvo pedido explícito: "PRIMERA CUESTIÓN", "SEGUNDA CUESTIÓN", "AUTOS Y VISTO", "CONSIDERANDO", "SENTENCIA", "RESUELVE", "R E S U E L V E:", "Por ello, atento a...". El sistema los agrega por código.
+2. NUNCA pongas nombre de juez al inicio/final.
+3. NUNCA inventes jueces. Únicos del tribunal: Zacarías, Stolarczyk, Weiss.
+4. NUNCA uses headers Markdown (#, ##, ###). Las ## de los prompts son indicadores ESTRUCTURALES para vos, no formato. Prosa corrida, doble salto entre párrafos.
+5. NUNCA numerés con romanos (I, II) ni arábigos como títulos. Solo se permiten "1°)", "2°)" en el dispositivo cuando se pida.
+6. Cada sección empieza EXACTAMENTE con la frase que el prompt indique.`;
 
 // =============================================================================
 // HELPERS
@@ -210,7 +123,6 @@ function tipoFromCalculos(calculos, datos) {
   return 'ACCIDENTE';
 }
 
-// --- NUEVO v2.6: distinción física vs psicofísica -----------------------------
 function tieneIncapacidadPsiquica(datos) {
   const psiAcr = datos?.incapacidad_acreditada_pericia?.psiquica_porcentaje;
   const psiPerito = datos?.pericia_psiquiatrica?.incapacidad_porcentaje;
@@ -221,18 +133,13 @@ function tieneIncapacidadPsiquica(datos) {
 }
 
 export function terminoSecuelas(datos) {
-  // Devuelve 'psicofísica' si hay incapacidad psíquica acreditada; sino 'física'.
   return tieneIncapacidadPsiquica(datos) ? 'psicofísica' : 'física';
 }
 
-// --- NUEVO v2.6: detección de impugnación REAL (posterior al dictamen) ---------
 function huboImpugnacionReal(datos) {
   const imps = datos?.impugnaciones_pericia;
   if (!Array.isArray(imps) || imps.length === 0) return false;
   const fechaDictamen = datos?.pericia_medica?.fecha_dictamen;
-  // Si tenemos fecha de dictamen, exigimos que al menos una impugnación sea
-  // posterior. Si no hay fechas comparables, confiamos en el flag del extract
-  // (que ya filtra contestación vs impugnación).
   const parse = (f) => {
     if (!f) return null;
     const m = String(f).match(/(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/);
@@ -244,18 +151,18 @@ function huboImpugnacionReal(datos) {
   const fd = parse(fechaDictamen);
   return imps.some(i => {
     const fi = parse(i?.fecha);
-    if (fd == null || fi == null) return !!i?.fecha; // sin fechas: confiar en presencia
-    return fi > fd; // impugnación posterior al dictamen = real
+    if (fd == null || fi == null) return !!i?.fecha;
+    return fi > fd;
   });
 }
 
-const REGLA_DATOS = `RECORDATORIO: usá TODOS los datos exactos del expediente y del JSON, de forma CONCISA. Si un dato es estructuralmente necesario y NO figura en NINGUNA fuente, escribí literal "[FALTA: descripción]". NUNCA escribas "si bien no surge...", "se desprende que...", "puede inferirse...", "presumiblemente...", ni la muletilla "no habiendo producido prueba técnica que desvirtúe...". NUNCA atribuyas al perito el % que reclama la demanda. NUNCA inventes un perito psicólogo si solo hubo legista. NUNCA confundas la contestación de demanda con una impugnación de la pericia.
+const REGLA_DATOS = `Datos exactos, CONCISO. Dato estructural ausente en todas las fuentes → "[FALTA: descripción]". Prohibidas: "si bien no surge...", "se desprende que...", "puede inferirse...", "presumiblemente...", "no habiendo producido prueba técnica que desvirtúe...". NUNCA atribuyas al perito el % reclamado. NUNCA inventes perito psi. NUNCA confundas contestación con impugnación.
 
 `;
 
 function bloqueValoresPrecalculados(calculos, config, datos) {
   if (!calculos) {
-    return '\n# VALORES NUMÉRICOS A USAR\n\n(No hay cálculos disponibles — esto indica RECHAZO de la demanda. Redactá la sentencia en consecuencia.)\n';
+    return '\n# VALORES\n(Sin cálculos → indica RECHAZO de la demanda. Redactá en consecuencia.)\n';
   }
 
   const tipo = tipoFromCalculos(calculos, datos);
@@ -265,45 +172,43 @@ function bloqueValoresPrecalculados(calculos, config, datos) {
     || '[FALTA: fecha del evento]';
   const rfecha = config?.ripte_fecha || 'último publicado';
 
-  const bloqueAdicional20 = calculos.esAccidente
-    ? `  - Incremento 20% (art. 3 ley 26.773): $ ${calculos.fmt?.adicional20 || ''}`
-    : `  - NO se aplica +20% — es enfermedad profesional, no accidente`;
+  const bloque20 = calculos.esAccidente
+    ? `  - +20% (art. 3 ley 26.773): $ ${calculos.fmt?.adicional20 || ''}`
+    : `  - NO se aplica +20% (es enfermedad, no accidente)`;
 
   const fuenteNote = calculos.fuente === 'planilla_calm'
-    ? '\nFUENTE: Planilla del Instituto de Derecho del Trabajo del CALM. El % de incapacidad cargado en la planilla es el VALOR VINCULANTE para la indemnización.\n'
+    ? '\nFUENTE: Planilla CALM. El % de la planilla es VINCULANTE.\n'
     : '';
 
   return `
-# VALORES NUMÉRICOS A USAR (USAR EXACTAMENTE ESTOS — NO INVENTAR OTROS)
+# VALORES NUMÉRICOS A USAR (TEXTUAL — no inventar otros)
 
-DATOS DEL CASO:
-  - Tipo: ${tipo === 'ACCIDENTE' ? 'ACCIDENTE DE TRABAJO' : tipo === 'ENFERMEDAD' ? 'ENFERMEDAD PROFESIONAL' : 'ACCIÓN DE REVISIÓN DE COMISIÓN MÉDICA (Ley 15.057)'}
-  - Fecha de ${esEnf ? 'primera manifestación invalidante' : 'accidente'}: ${fechaContingencia}
-  - Edad del actor al evento: ${calculos.edad || '[FALTA: edad]'} años
-  - Porcentaje de incapacidad ACREDITADA (= el que va en la condena): ${calculos.porcentaje || '[FALTA: % acreditado]'}%
-  - Naturaleza de la incapacidad: ${terminoSecuelas(datos).toUpperCase()} (usá este término, NO el otro)
+CASO:
+  - Tipo: ${tipo === 'ACCIDENTE' ? 'ACCIDENTE DE TRABAJO' : tipo === 'ENFERMEDAD' ? 'ENFERMEDAD PROFESIONAL' : 'ACCIÓN DE REVISIÓN CM (Ley 15.057)'}
+  - Fecha ${esEnf ? 'primera manifestación' : 'accidente'}: ${fechaContingencia}
+  - Edad al evento: ${calculos.edad || '[FALTA]'} años
+  - % incapacidad ACREDITADA: ${calculos.porcentaje || '[FALTA]'}%
+  - Naturaleza: ${terminoSecuelas(datos).toUpperCase()} (usá este término)
 
-VALORES RIPTE:
-  - RIPTE al mes del ${esEnf ? 'evento' : 'accidente'}: $ ${calculos.fmt?.ripteAccidente || ''}
-  - RIPTE actual (${rfecha}): $ ${calculos.fmt?.ripteActual || ''}
-  - Coeficiente RIPTE: ${calculos.coefRipte != null ? Number(calculos.coefRipte).toFixed(4) : ''}
+RIPTE:
+  - Mes ${esEnf ? 'evento' : 'accidente'}: $ ${calculos.fmt?.ripteAccidente || ''}
+  - Actual (${rfecha}): $ ${calculos.fmt?.ripteActual || ''}
+  - Coef: ${calculos.coefRipte != null ? Number(calculos.coefRipte).toFixed(4) : ''}
 
-IBM Y HIPÓTESIS:
-  - IBM bruto AFIP (mensual): $ ${calculos.fmt?.ibmBruto || ''}
-  - Intereses tasa activa BNA acumulados: $ ${calculos.fmt?.intereseseBNA || ''}
-  - IBM con intereses BNA: $ ${calculos.fmt?.ibmConIntereses || ''}
-  - Indemnización hipótesis (a) tasa activa BNA: $ ${calculos.fmt?.hipotesisA || ''}
+IBM:
+  - IBM bruto AFIP: $ ${calculos.fmt?.ibmBruto || ''}
+  - Intereses BNA: $ ${calculos.fmt?.intereseseBNA || ''}
+  - IBM con intereses: $ ${calculos.fmt?.ibmConIntereses || ''}
+  - Hipótesis (a) BNA: $ ${calculos.fmt?.hipotesisA || ''}
   - IBM con RIPTE: $ ${calculos.fmt?.ibmRIPTE || ''}
-  - Indemnización hipótesis (b) RIPTE (sin +20%): $ ${calculos.fmt?.hipotesisB || ''}
+  - Hipótesis (b) RIPTE (sin +20%): $ ${calculos.fmt?.hipotesisB || ''}
 
-CONDENA FINAL:
-${bloqueAdicional20}
-  - MONTO TOTAL DE CONDENA: $ ${calculos.fmt?.total || ''}
-  - Monto total en letras: ${calculos.totalEnLetras || ''}
+CONDENA:
+${bloque20}
+  - TOTAL: $ ${calculos.fmt?.total || ''}
+  - En letras: ${calculos.totalEnLetras || ''}
 ${fuenteNote}
-# REGLA CRÍTICA
-
-Cualquier monto que insertes DEBE coincidir EXACTAMENTE con uno de los valores listados arriba. Si necesitás un número que no figura, OMITÍ la oración. El porcentaje de incapacidad para la condena es UNO SOLO: el "ACREDITADA" de arriba.
+Cualquier monto que insertes DEBE estar en esta lista. % = ÚNICO valor "ACREDITADA".
 `;
 }
 
@@ -317,47 +222,32 @@ export function buildExtractUserPrompt(chunks) {
 
   if (fullText && fullText.length > 0) {
     const tramos = [];
-    tramos.push(
-      `=== TRAMO 1 — INICIO DEL EXPEDIENTE (demanda y contestación de demanda) ===\n` +
-      fullText.slice(0, 30000)
-    );
+    tramos.push(`=== TRAMO 1 — INICIO (demanda y contestación) ===\n` + fullText.slice(0, 30000));
     if (chunks.pericia && chunks.pericia.length > 200) {
-      tramos.push(
-        `=== TRAMO 2 — DICTAMEN PERICIAL MÉDICO ===\n` +
-        chunks.pericia.slice(0, 8000)
-      );
+      tramos.push(`=== TRAMO 2 — DICTAMEN PERICIAL ===\n` + chunks.pericia.slice(0, 8000));
     } else if (fullText.length > 30000) {
-      tramos.push(
-        `=== TRAMO 2 — TRAMO MEDIO DEL EXPEDIENTE (probable dictamen pericial) ===\n` +
-        fullText.slice(30000, Math.min(50000, fullText.length))
-      );
+      tramos.push(`=== TRAMO 2 — MEDIO (probable pericia) ===\n` + fullText.slice(30000, Math.min(50000, fullText.length)));
     }
     if (chunks.final && chunks.final.length > 200) {
-      tramos.push(
-        `=== TRAMO 3 — FINAL DEL EXPEDIENTE (impugnaciones, oficios, escritos posteriores) ===\n` +
-        chunks.final.slice(0, 5000)
-      );
+      tramos.push(`=== TRAMO 3 — FINAL (impugnaciones, oficios) ===\n` + chunks.final.slice(0, 5000));
     } else if (fullText.length > 50000) {
-      tramos.push(
-        `=== TRAMO 3 — FINAL DEL EXPEDIENTE ===\n` +
-        fullText.slice(-6000)
-      );
+      tramos.push(`=== TRAMO 3 — FINAL ===\n` + fullText.slice(-6000));
     }
     cuerpoExpediente = tramos.join('\n\n');
   } else {
     const tramos = [];
     if (chunks.header) {
-      tramos.push(`=== TRAMO 1 — INICIO DEL EXPEDIENTE ===\n` + chunks.header.slice(0, 16000));
+      tramos.push(`=== TRAMO 1 — INICIO ===\n` + chunks.header.slice(0, 16000));
       if (chunks.header.length > 16000) {
-        tramos.push(`=== TRAMO 2 — CONTINUACIÓN (probable contestación) ===\n` + chunks.header.slice(16000, 28000));
+        tramos.push(`=== TRAMO 2 — CONTINUACIÓN ===\n` + chunks.header.slice(16000, 28000));
       }
     }
-    if (chunks.pericia) tramos.push(`=== TRAMO 3 — DICTAMEN PERICIAL ===\n` + chunks.pericia.slice(0, 8000));
-    if (chunks.final) tramos.push(`=== TRAMO 4 — FINAL DEL EXPEDIENTE ===\n` + chunks.final.slice(0, 4000));
+    if (chunks.pericia) tramos.push(`=== TRAMO 3 — PERICIA ===\n` + chunks.pericia.slice(0, 8000));
+    if (chunks.final) tramos.push(`=== TRAMO 4 — FINAL ===\n` + chunks.final.slice(0, 4000));
     cuerpoExpediente = tramos.join('\n\n');
   }
 
-  return `Del siguiente texto de un expediente JUDICIAL DIGITAL (MEV) del Tribunal del Trabajo N° 5 de Quilmes, extraé exactamente estos datos. Respondé SOLO el JSON, sin texto adicional ni bloques de markdown:
+  return `Del expediente MEV (Tribunal del Trabajo N° 5 Quilmes), extraé SOLO este JSON (sin markdown ni texto adicional):
 
 {
   "causa_numero": "",
@@ -428,58 +318,39 @@ export function buildExtractUserPrompt(chunks) {
   "fecha_ingreso": ""
 }
 
-# DÓNDE BUSCAR CADA DATO (encabezados MEV característicos)
+# DÓNDE BUSCAR (encabezados MEV)
 
-- "Trámite: DEMANDA - SE PRESENTA" → letrado_actor + fecha de demanda. Matrícula "Tº [Romano] Fº [N]" en el primer párrafo. Colegio: "C.A.L.Z"→CALZ; "C.A.S.I."→CASI; "C.A.Q."→CAQ; "C.A.M."→CAM; "C.A.L.P."→CALP.
+- "Trámite: DEMANDA - SE PRESENTA" → letrado_actor + fecha demanda. Matrícula "Tº [Romano] Fº [N]". Colegio: C.A.L.Z→CALZ, C.A.S.I.→CASI, C.A.Q.→CAQ, C.A.M.→CAM, C.A.L.P.→CALP.
+- "Trámite: DEMANDA - CONTESTA" → letrado_demandada + fecha_contestacion. postura_demandada_resumen = 1-2 oraciones (excepciones, baremo, preexistencias, constitucionalidad). OJO: NO es impugnación de pericia.
+- "Trámite: DICTAMEN PERICIAL - PRESENTA" → pericia_medica (nombre, matrícula, fecha dictamen).
+- "Trámite: IMPUGNA DICTAMEN PERICIAL" → impugnaciones_pericia[]. SOLO llenar si la fecha es POSTERIOR a la del dictamen. Lo que la demandada dijo en su contestación NO va acá. Si no hay impugnación posterior → array vacío [].
+- "Trámite: PERITO - CONTESTA IMPUGNACIÓN" → fecha_contestacion_perito.
+- Dictamen CM: "Dictamen Médico Expte [N°]", "Comisión Médica N° [N°]", "Disposición de Alcance Particular". Expte SRT formato "NNNNNN/AA".
 
-- "Trámite: DEMANDA - CONTESTA" → letrado_demandada + fecha_contestacion_demanda. postura_demandada_resumen: síntesis BREVE (1-2 oraciones) de sus defensas (excepciones, baremo, preexistencias, constitucionalidad, rechazo RIPTE). IMPORTANTE: lo que la demandada diga acá NO es una impugnación de pericia.
+# PLURALIDAD (accidentes_adicionales)
+Si el actor reclama por 2+ accidentes (fechas distintas, todos objeto de demanda): el principal en "accidente", el resto en "accidentes_adicionales[]". Si solo hay uno → []. NO confundir con preexistencia (daño anterior YA reconocido en otro expediente que invoca la demandada → preexistencias_denunciadas).
 
-- "Trámite: DICTAMEN PERICIAL - PRESENTA" → pericia_medica.perito_nombre / perito_matricula / fecha_dictamen.
+# OFICIOS (contestaciones_oficios)
+Al final del expediente suelen agregarse:
+- AFIP/ARCA (remuneraciones): si está, presente=true + fecha + síntesis breve.
+- SRT (trámite admin/dictamen CM): si está, presente=true + fecha + síntesis breve.
+Si no aparecen → presente=false.
 
-- "Trámite: IMPUGNA DICTAMEN PERICIAL" → impugnaciones_pericia[]. ATENCIÓN: SOLO llená este array si existe un escrito con este trámite cuya fecha sea POSTERIOR a la fecha del dictamen pericial. Si la demandada solo cuestionó la pericia dentro de su contestación de demanda (anterior al dictamen), NO es una impugnación: dejá impugnaciones_pericia como array vacío [].
+# TIPO DE ACCIÓN
+"ACCIDENTE" (hecho súbito/traumático) | "ENFERMEDAD" (exposición/COVID DNU 367/2020) | "REVISION_CM" (frases "acción de revisión", "ley 15.057", "art. 2 inc. j ley 15.057"). En "tipo_accion_detectado" copiá la frase literal.
 
-- "Trámite: PERITO - CONTESTA IMPUGNACIÓN" → impugnaciones_pericia[].fecha_contestacion_perito.
+# DOS % DISTINTOS — NO confundir
+incapacidad_reclamada_demanda = lo que el ACTOR pide ("estima en un X%").
+incapacidad_acreditada_pericia = lo que el PERITO estableció ("INCAPACIDAD X% de T.O.", "BAREMACIÓN"). Si la pericia no aparece, dejá acreditada en null.
 
-- Dictamen de Comisión Médica: "Dictamen Médico Expte [N°]", "Comisión Médica N° [N°]", "Disposición de Alcance Particular". Formato SRT "NNNNNN/AA".
+# PSÍQUICO — ESTRICTO
+psiquica_porcentaje: SOLO si el perito fijó incapacidad psíquica POSITIVA. Si concluyó "no amerita incapacidad psíquica" / "sin patología" → 0 (cero), no null y no inventado.
+pericia_psiquiatrica.tiene=true SOLO si hubo perito psi DESINSACULADO Y DICTAMINANDO (distinto del legista). Que el legista evalúe lo psíquico dentro de su dictamen NO cuenta.
 
-# PLURALIDAD DE ACCIDENTES (accidentes_adicionales)
-
-Si el actor reclama por MÁS DE UN accidente (dos o más hechos con fechas distintas, todos objeto de la demanda):
-- El primero/principal va en "accidente".
-- Los demás van en "accidentes_adicionales[]" (cada uno con su fecha, descripción, diagnóstico y % reclamado).
-NO confundas un accidente RECLAMADO con una PREEXISTENCIA. La preexistencia es un daño anterior YA reconocido en OTRO expediente (con su propio N° y dictamen) que la demandada invoca para deducir → va en preexistencias_denunciadas, NO en accidentes_adicionales.
-Si solo hay un accidente, dejá accidentes_adicionales como array vacío [].
-
-# CONTESTACIONES DE OFICIOS (contestaciones_oficios)
-
-Hacia el final del expediente suelen agregarse respuestas a oficios librados:
-- AFIP/ARCA (remuneraciones del actor): buscá "AFIP", "ARCA", "respuesta de oficio", "remuneraciones informadas". Si está, poné afip_arca.presente=true + fecha + síntesis muy breve.
-- SRT (Superintendencia de Riesgos del Trabajo — trámite administrativo / dictamen CM): buscá "Superintendencia de Riesgos del Trabajo", "SRT contesta oficio". Si está, poné srt.presente=true + fecha + síntesis muy breve.
-Si no aparecen, dejá presente=false.
-
-# TIPO DE ACCIÓN (campo "tipoAccion")
-
-Elegí UNO: "ACCIDENTE" (hecho súbito/traumático), "ENFERMEDAD" (exposición prolongada/COVID DNU 367/2020), "REVISION_CM" (frases "acción de revisión", "ley 15.057", "revisión de resolución de Comisión Médica", "art. 2 inc. j ley 15.057"). En "tipo_accion_detectado" copiá la frase literal.
-
-# DOS PORCENTAJES DISTINTOS — NO LOS CONFUNDAS
-
-**incapacidad_reclamada_demanda**: lo que el ACTOR pide en la demanda ("incapacidad que se estima en un X%"). Pretensión, no hecho probado.
-**incapacidad_acreditada_pericia**: lo que el PERITO estableció ("INCAPACIDAD: X% de la T.O.", "BAREMACIÓN"). Hecho probado. Puede ser menor.
-NUNCA copies el reclamado al acreditado. Si la pericia no aparece, dejá acreditada en null.
-
-# INCAPACIDAD PSÍQUICA — ESTRICTO
-
-incapacidad_acreditada_pericia.psiquica_porcentaje: poné el % SOLO si el perito fijó incapacidad psíquica POSITIVA. Si el perito evaluó lo psíquico y concluyó que "no amerita fijar incapacidad por daño psíquico" / "no presenta patología psíquica" → poné 0 (cero), NO null y NO un número inventado.
-pericia_psiquiatrica.tiene = true SOLO si hubo perito psicólogo/psiquiatra DESINSACULADO Y DICTAMINANDO, distinto del legista. Que el legista evalúe lo psíquico dentro de su dictamen NO cuenta como perito psi separado.
-
-# REGLAS GENERALES DE EXTRACCIÓN
-
-- LETRADO: tomo y folio POR SEPARADO. Colegio normalizado.
-- CARÁTULA: formato "ACTOR C/ DEMANDADO S/ MATERIA".
+# REGLAS GENERALES
+- Tomo y folio POR SEPARADO. Carátula: "ACTOR C/ DEMANDADO S/ MATERIA".
 - denuncia_inconst_ley_23928: true si planteó inconst. art. 7 ley 23.928 o invocó "Barrios".
-- preexistencias_denunciadas: array de {expte, fecha_atep, porcentaje, region_corporal} si la demandada las denuncia. Sino [].
-- Valores no encontrados: null (o false/0/"" según tipo). NO inventes.
-- Respondé SOLO el JSON.
+- Valores ausentes: null/false/0/"" según tipo. NO inventes.
 
 TEXTO DEL EXPEDIENTE:
 
@@ -508,99 +379,75 @@ export function buildAntecedentesUserPrompt(chunks, datos, config) {
   const hayOficioAfip = oficios?.afip_arca?.presente === true;
   const hayOficioSrt = oficios?.srt?.presente === true;
 
-  const bloqueRevisionCM = esRev ? `
+  const bloqueRev = esRev ? `
 
-# CASO ESPECIAL: ACCIÓN DE REVISIÓN DE COMISIÓN MÉDICA (Ley 15.057)
-
-En los Antecedentes, BREVEMENTE:
-1. Agotamiento de la instancia ante la Comisión Médica N° ${datos?.tramite_cm?.comision_medica_numero || '[FALTA: N° CM]'}.
-2. Dictamen de la CM: fecha (${datos?.tramite_cm?.fecha_dictamen_cm || '[FALTA: fecha dictamen CM]'}) y % reconocido (${datos?.tramite_cm?.incapacidad_cm_porcentaje != null ? datos.tramite_cm.incapacidad_cm_porcentaje + '%' : '[FALTA: % CM]'}).
-3. Disconformidad del actor → interpone acción de revisión (art. 2 inc. j ley 15.057).
+# REVISIÓN CM (acción art. 2 inc. j ley 15.057)
+Mencionar BREVE: agotamiento ante CM N° ${datos?.tramite_cm?.comision_medica_numero || '[FALTA]'}, dictamen de ${datos?.tramite_cm?.fecha_dictamen_cm || '[FALTA]'} con ${datos?.tramite_cm?.incapacidad_cm_porcentaje != null ? datos.tramite_cm.incapacidad_cm_porcentaje + '%' : '[FALTA]'}, disconformidad → revisión.
 ` : '';
 
-  const bloquePluralidad = hayPluralidad ? `
+  const bloquePlural = hayPluralidad ? `
 
-# PLURALIDAD DE ACCIDENTES (este expediente reclama por más de un hecho)
+# PLURALIDAD (${adicionales.length + 1} accidentes reclamados)
+Detallá CADA uno (fecha, mecánica breve, lesiones, % reclamado):
+- Acc 1: ${datos?.accidente?.fecha || '[FALTA]'} — ver descripción en JSON
+${adicionales.map((a, i) => `- Acc ${i + 2}: ${a.fecha || '[FALTA]'} — ${a.descripcion || '[FALTA]'}${a.incapacidad_reclamada_porcentaje != null ? ` (${a.incapacidad_reclamada_porcentaje}%)` : ''}`).join('\n')}
+NO fusiones. NO confundas con preexistencia.
+` : '';
 
-Se reclama por ${adicionales.length + 1} accidentes. DETALLÁ CADA UNO en el relato (fecha, mecánica breve, lesiones, % reclamado):
-- Accidente 1 (principal): ${datos?.accidente?.fecha || '[FALTA: fecha]'} — ${datos?.accidente?.descripcion_detallada ? 'ver descripción del JSON' : '[FALTA: descripción]'}
-${adicionales.map((a, i) => `- Accidente ${i + 2}: ${a.fecha || '[FALTA: fecha]'} — ${a.descripcion || '[FALTA: descripción]'}${a.incapacidad_reclamada_porcentaje != null ? ` (reclama ${a.incapacidad_reclamada_porcentaje}%)` : ''}`).join('\n')}
-NO fusiones los hechos en uno solo. NO confundas estos accidentes reclamados con las preexistencias (que son daños anteriores ya reconocidos invocados por la demandada).
-` : `
+  const bloqueOf = (hayOficioAfip || hayOficioSrt) ? `
 
-# UN SOLO ACCIDENTE
-Este expediente reclama por un único hecho. Si en el texto detectaras un segundo accidente reclamado que no figura en el JSON, mencionalo igual; pero NO confundas una preexistencia invocada por la demandada con un accidente reclamado.
-`;
-
-  const bloqueOficios = (hayOficioAfip || hayOficioSrt) ? `
-
-# CONTESTACIONES DE OFICIOS (mencionar ANTES del cierre)
-
-Justo ANTES de la línea final "...se encuentran las actuaciones en estado de ser resueltas", agregá un párrafo breve mencionando las respuestas a los oficios agregadas al expediente:
-${hayOficioAfip ? `- AFIP/ARCA: respuesta de fecha ${oficios.afip_arca.fecha || '[FALTA: fecha]'} con las remuneraciones informadas del actor.` : ''}
-${hayOficioSrt ? `- Superintendencia de Riesgos del Trabajo (SRT): respuesta de fecha ${oficios.srt.fecha || '[FALTA: fecha]'} con las constancias del trámite administrativo.` : ''}
-Frase tipo: "Se agregaron a las actuaciones las respuestas a los oficios librados a [AFIP/ARCA y/o la SRT], en fecha [...]."
+# OFICIOS (ANTES del cierre)
+Justo ANTES de "...se encuentran las actuaciones en estado de ser resueltas", agregá UN párrafo breve:
+${hayOficioAfip ? `- AFIP/ARCA: respuesta de ${oficios.afip_arca.fecha || '[FALTA]'} con remuneraciones.` : ''}
+${hayOficioSrt ? `- SRT: respuesta de ${oficios.srt.fecha || '[FALTA]'} con constancias del trámite administrativo.` : ''}
+Tipo: "Se agregaron a las actuaciones las respuestas a los oficios librados a [AFIP/ARCA y/o la SRT], en fecha [...]."
 ` : '';
 
   return REGLA_DATOS +
-`TEXTO DEL EXPEDIENTE (demanda, contestación, prueba):
+`TEXTO DEL EXPEDIENTE (demanda, contestación):
 
 ${chunks.header}
 
-DATOS YA EXTRAÍDOS (fuente PRIMARIA — usalos directamente):
+DATOS EXTRAÍDOS (fuente primaria):
 
 ${JSON.stringify(datos, null, 2)}
 
-# CONCISIÓN (IMPORTANTE)
+# CONCISIÓN
+Redactá Antecedentes ~MITAD de un relato exhaustivo. Conservá datos duros (nombres, fechas, montos, %); resumí el relato del hecho en 2-3 oraciones; lesiones en enumeración breve; postura de la demandada en 2-3 oraciones.
 
-Redactá los Antecedentes de forma SINTÉTICA, aproximadamente la MITAD de lo que sería un relato exhaustivo. Conservá datos duros (nombres, DNI, fechas, montos, %), pero resumí: el relato del hecho en 2-3 oraciones, las lesiones en una enumeración breve, la postura de la demandada en 2-3 oraciones. NO transcribas exhaustivamente cada planteo.
-
-# TIPO DE CASO
-
-Tipo: ${tipo} — ${esEnf ? 'enfermedad profesional' : esRev ? 'acción de revisión de Comisión Médica' : 'accidente de trabajo'}. Usá "${terminoHecho}".
-${bloqueRevisionCM}${bloquePluralidad}
-# DISTINCIÓN OBLIGATORIA: RECLAMADA vs ACREDITADA
-
-En Antecedentes describís la PRETENSIÓN → usás la RECLAMADA:
-  - Reclamada física: ${recl.fisica_porcentaje != null ? recl.fisica_porcentaje + '%' : '[FALTA: % físico reclamado]'}
-  - Reclamada psíquica: ${recl.psiquica_porcentaje != null ? recl.psiquica_porcentaje + '%' : 'sin reclamo psíquico'}
-  - Reclamada total: ${recl.total_porcentaje != null ? recl.total_porcentaje + '%' : '[FALTA: % total reclamado]'}
-
-La incapacidad ACREDITADA por la pericia va recién en Resolución. NO la adelantes acá.
+# TIPO
+${tipo} — usá "${terminoHecho}".
+${bloqueRev}${bloquePlural}
+# RECLAMADA (acá usás la RECLAMADA, NO la pericial)
+- Física: ${recl.fisica_porcentaje != null ? recl.fisica_porcentaje + '%' : '[FALTA]'}
+- Psíquica: ${recl.psiquica_porcentaje != null ? recl.psiquica_porcentaje + '%' : 'sin reclamo psíquico'}
+- Total: ${recl.total_porcentaje != null ? recl.total_porcentaje + '%' : '[FALTA]'}
 
 # TAREA
+"Antecedentes:" del voto de Primera Cuestión, como ${j1}. SIN "a fs. X" — usá presentaciones electrónicas con fecha.
 
-Redactá ÚNICAMENTE la sección "Antecedentes:" del voto principal de la Primera Cuestión, como ${j1}.
-
-# REGLA SOBRE EXPEDIENTE DIGITAL
-NO uses "a fs. X". Usá "Mediante presentación electrónica de fecha [DD/MM/AAAA]...".
-
-# CONTENIDO OBLIGATORIO (CONCISO)
-
-1. Demanda: fecha + letrado actor (nombre + tomo + folio + colegio).
-2. Actor: nombre, DNI, CUIL, fecha nacimiento, domicilio, tareas.
+# CONTENIDO (BREVE)
+1. Demanda: fecha + letrado actor (nombre + Tº/Fº + colegio).
+2. Actor: nombre, DNI, CUIL, fecha nac., domicilio, tareas.
 3. Empleador: nombre, CUIT, tareas/horario (breve).
-4. Demandada (ART): nombre, CUIT, domicilio.
-5. Relato del ${esEnf ? 'cuadro' : 'siniestro'} (2-3 oraciones; si hay pluralidad, cada hecho).
-6. Diagnóstico inicial, alta (breve).
-7. Incapacidad RECLAMADA (valores de arriba).
-8. ${esRev ? 'Trámite CM con dictamen y disconformidad.' : 'Si hubo trámite previo CM, mención breve.'}
+4. Demandada: nombre, CUIT, domicilio.
+5. Relato del ${esEnf ? 'cuadro' : 'siniestro'} (2-3 oraciones; si hay pluralidad, CADA hecho).
+6. Diagnóstico y alta (breve).
+7. Incapacidad RECLAMADA (valores arriba).
+8. ${esRev ? 'Trámite CM, dictamen, disconformidad.' : 'Mención breve si hubo trámite CM.'}
 9. Inconstitucionalidades planteadas (lista breve).
 10. Monto reclamado.
-11. Contestación: fecha + letrado + postura (2-3 oraciones). Preexistencias denunciadas si las hay.
+11. Contestación: fecha + letrado + postura (2-3 oraciones). Preexistencias si las hay.
 12. Auto de apertura a prueba.
-13. Dictamen pericial: SOLO mencionar que fue presentado en fecha [FECHA] por el perito Dr. [NOMBRE]. NO conclusiones acá.
+13. Dictamen pericial: SOLO mencionar que se presentó en fecha [FECHA] por Dr. [NOMBRE]. Sin conclusiones acá.
 14. Impugnaciones: ${huboImpugnacionReal(datos)
-    ? 'mencionar la(s) impugnación(es) del dictamen y respuesta(s) del perito con sus fechas.'
-    : 'NO hubo impugnación posterior al dictamen — NO menciones ninguna impugnación de pericia. (Lo que la demandada dijo en su contestación ya está en el punto 11.)'}
-15. Alegatos (si los hay).${bloqueOficios}
-16. Cierre: "Firme el llamamiento de autos para sentencia, se encuentran las actuaciones en estado de ser resueltas." ${(hayOficioAfip || hayOficioSrt) ? '(las contestaciones de oficios van ANTES de esta línea)' : ''}
-
-# OMISIONES Y MARCADORES
-Dato estructural ausente → "[FALTA: descripción]". NUNCA "se desprende que...".
+    ? 'mencionar impugnación(es) y respuesta(s) del perito con fechas.'
+    : 'NO hubo impugnación posterior al dictamen — NO menciones impugnaciones (los planteos de la contestación ya están en el punto 11).'}
+15. Alegatos (si los hay).${bloqueOf}
+16. Cierre: "Firme el llamamiento de autos para sentencia, se encuentran las actuaciones en estado de ser resueltas."
 
 # FORMATO
-Comenzá EXACTAMENTE con "Antecedentes:". No incluyas "Así lo voto".`;
+Primer carácter: "A" de "Antecedentes:". No "Así lo voto" acá.`;
 }
 
 // =============================================================================
@@ -614,7 +461,7 @@ export function buildResolucionUserPrompt(chunks, datos, config) {
   const terminoHecho = esEnf ? 'la enfermedad profesional'
     : esRev ? 'el hecho denunciado'
     : 'el accidente de trabajo';
-  const termSec = terminoSecuelas(datos); // 'física' | 'psicofísica'
+  const termSec = terminoSecuelas(datos);
 
   const acr = datos?.incapacidad_acreditada_pericia || {};
   const peritoMed = datos?.pericia_medica || {};
@@ -625,107 +472,85 @@ export function buildResolucionUserPrompt(chunks, datos, config) {
   const incapAcredPsi = acr.psiquica_porcentaje;
   const incapAcredTot = acr.total_porcentaje;
 
-  const bloqueRevisionCM = esRev ? `
+  const bloqueRev = esRev ? `
 
-# CASO ACCIÓN DE REVISIÓN CM
-
-Cuestión controvertida: % de la CM (${datos?.tramite_cm?.incapacidad_cm_porcentaje ?? '[FALTA]'}%) vs % de la pericia judicial (${incapAcredTot ?? '[FALTA: % acreditado]'}%).
-Si la pericia es mayor → reformar el dictamen y reconocer el mayor. Si confirma → confirmar. Si es menor → reducir.
-Cierre (acá se REFORMA y se DECLARA, NO en el dispositivo): "En consecuencia, corresponde reformar el dictamen de la Comisión Médica N° [X] de fecha [X] y declarar que el actor es portador de una incapacidad ${termSec} parcial y permanente del [X]% de la T.O. por ${terminoHecho}, conforme art. 2 inc. j ley 15.057 y art. 14.2 LRT."
+# REVISIÓN CM
+Controvertido: % CM (${datos?.tramite_cm?.incapacidad_cm_porcentaje ?? '[FALTA]'}%) vs % pericia (${incapAcredTot ?? '[FALTA]'}%).
+Pericia mayor → reformar + reconocer el mayor. Igual → confirmar. Menor → reducir.
+Cierre (acá REFORMÁS y DECLARÁS, NO en el dispositivo): "En consecuencia, corresponde reformar el dictamen de la Comisión Médica N° [X] de fecha [X] y declarar que el actor es portador de una incapacidad ${termSec} parcial y permanente del [X]% de la T.O. por ${terminoHecho}, conforme art. 2 inc. j ley 15.057 y art. 14.2 LRT."
 ` : `
 
-# CIERRE OBLIGATORIO
-
+# CIERRE
 "No hallando razones que ameriten apartarme de lo dictaminado por el perito médico, tengo por probado que el actor es portador de una incapacidad ${termSec} parcial y permanente del [X]% de la T.O. por ${terminoHecho} sufrido en autos (art. 57 inc. 5 ley 15.057; arts. 6 y 14.2 LRT)."
 `;
 
   const peritoPsiBloque = peritoPsi.tiene ? `
-- HAY perito psicológico/psiquiátrico designado:
-  - Nombre: ${peritoPsi.perito_nombre || '[FALTA: nombre perito psi]'}
-  - Fecha dictamen: ${peritoPsi.fecha_dictamen || '[FALTA: fecha dictamen psi]'}
-  - % psíquico acreditado: ${peritoPsi.incapacidad_porcentaje != null ? peritoPsi.incapacidad_porcentaje + '%' : '[FALTA: % psíquico]'}
-` : `
-- NO hay perito psicológico ni psiquiátrico separado. ${incapAcredPsi != null && Number(incapAcredPsi) > 0 ? 'El % psíquico fue fijado por el médico legista.' : 'El perito legista evaluó lo psíquico y NO fijó incapacidad psíquica → la incapacidad es FÍSICA. Podés mencionar brevemente que el examen psíquico no arrojó patología, pero NO uses "psicofísica".'}
-`;
+- Perito psi separado: ${peritoPsi.perito_nombre || '[FALTA]'}, dictamen ${peritoPsi.fecha_dictamen || '[FALTA]'}, % psíquico ${peritoPsi.incapacidad_porcentaje != null ? peritoPsi.incapacidad_porcentaje + '%' : '[FALTA]'}.` : `
+- SIN perito psi separado. ${incapAcredPsi != null && Number(incapAcredPsi) > 0 ? 'El % psíquico lo fijó el legista.' : 'El legista evaluó lo psíquico y NO fijó incapacidad → incapacidad es FÍSICA. Mencionalo brevemente; NO uses "psicofísica".'}`;
 
-  const bloqueImpugnaciones = impugnoReal ? `
-## 3. IMPUGNACIONES (hubo impugnación POSTERIOR al dictamen)
-
-Resumí BREVEMENTE los fundamentos de la impugnación y la respuesta del perito (con fechas). NO uses la muletilla prohibida sobre "prueba técnica que desvirtúe".
+  const bloqueImp = impugnoReal ? `
+## 3. IMPUGNACIONES (hubo, posterior al dictamen)
+Resumí BREVE fundamentos y respuesta del perito (con fechas). NO uses la muletilla prohibida.
 ` : `
 ## 3. IMPUGNACIONES
-NO hubo impugnación del dictamen posterior a su presentación. NO redactes bloque de impugnaciones. NO conviertas los planteos de la contestación de demanda en una impugnación. Pasá directo a preexistencias/conclusión.
+NO hubo impugnación posterior al dictamen. NO redactes bloque de impugnaciones. NO conviertas planteos de la contestación en impugnación. Pasá a preexistencias/conclusión.
 `;
 
   return REGLA_DATOS +
-`TEXTO DEL EXPEDIENTE - DICTAMEN PERICIAL MÉDICO:
+`PERICIA MÉDICA:
 
 ${chunks.pericia}
 
-CONTEXTO - INICIO DEL EXPEDIENTE:
+CONTEXTO INICIO:
 
 ${chunks.header.slice(0, 4000)}
 
-DATOS YA EXTRAÍDOS:
+DATOS:
 
 ${JSON.stringify(datos, null, 2)}
 
-# CONCISIÓN (IMPORTANTE)
+# CONCISIÓN
+Resolución ~MITAD de un relato exhaustivo. Por región: diagnóstico + hallazgo clave + %. SIN cada grado goniométrico ni cada signo, salvo si es decisivo.
 
-Redactá la Resolución de forma SINTÉTICA, ~MITAD de lo que sería un relato exhaustivo de la pericia. Por cada región: diagnóstico + hallazgo más relevante + %. NO transcribas cada grado goniométrico ni cada signo clínico salvo que sea decisivo. Prioritzá llegar a la conclusión.
+# TIPO Y NATURALEZA
+${tipo}. Incapacidad: ${termSec.toUpperCase()} (usá "${termSec}", NO el otro).
 
-# TIPO DE CASO
-Tipo: ${tipo}. Naturaleza de la incapacidad: ${termSec.toUpperCase()} (usá "${termSec}", NO el otro término).
-
-# DATOS CRÍTICOS DE LA PERICIA (USAR EXACTAMENTE ESTOS)
-
-Perito médico:
-- Nombre: ${peritoMed.perito_nombre || '[FALTA: nombre del perito médico]'}
-- Matrícula: ${peritoMed.perito_matricula || ''}
-- Fecha del dictamen: ${peritoMed.fecha_dictamen || '[FALTA: fecha del dictamen pericial]'}
-
-Incapacidad ACREDITADA (HECHO PROBADO, NO lo reclamado):
-- % físico: ${incapAcredFis != null ? incapAcredFis + '%' : '[FALTA: % físico pericial]'}
-- % psíquico: ${incapAcredPsi != null ? (Number(incapAcredPsi) > 0 ? incapAcredPsi + '%' : '0% (sin incapacidad psíquica — la incapacidad es FÍSICA)') : 'sin incapacidad psíquica dictaminada (la incapacidad es FÍSICA)'}
-- % total: ${incapAcredTot != null ? incapAcredTot + '%' : '[FALTA: % total pericial]'}
-
+# DATOS PERICIA (exactos)
+Perito: ${peritoMed.perito_nombre || '[FALTA]'}, mat. ${peritoMed.perito_matricula || ''}, dictamen ${peritoMed.fecha_dictamen || '[FALTA]'}.
+ACREDITADA: físico ${incapAcredFis != null ? incapAcredFis + '%' : '[FALTA]'} | psíquico ${incapAcredPsi != null ? (Number(incapAcredPsi) > 0 ? incapAcredPsi + '%' : '0% (sin daño psíquico → FÍSICA)') : 'sin dictamen psíquico (FÍSICA)'} | total ${incapAcredTot != null ? incapAcredTot + '%' : '[FALTA]'}.
 ${peritoPsiBloque}
 
 # REGLA DURÍSIMA
-NUNCA atribuyas al perito el % que reclama el actor. Si la demanda reclama 24% y la pericia acredita 5%, el % de esta sección es 5%.
+NUNCA atribuyas al perito el % que reclama el actor. Si reclama 24% y la pericia acredita 5%, acá va 5%.
 
 # IMPUGNACIÓN ≠ CONTESTACIÓN
-${impugnoReal
-  ? 'Hubo impugnación posterior al dictamen — podés tratarla.'
-  : 'NO hubo impugnación posterior al dictamen. Los planteos de la demandada en su contestación (baremo, preexistencias, etc.) NO son una impugnación de la pericia. NO escribas "la demandada impugnó el dictamen". NO cites como fecha de impugnación la fecha de la contestación.'}
+${impugnoReal ? 'Hubo impugnación posterior al dictamen — tratala.' : 'NO hubo impugnación posterior. Lo que la demandada dijo en su contestación (baremo, preexistencias) NO es impugnación. NO escribas "la demandada impugnó". NO cites como fecha de impugnación la fecha de la contestación.'}
 
 # TAREA
-Redactá ÚNICAMENTE la sección "Resolución:". NO incluyas IBM ni indemnización.
+"Resolución:". SIN IBM ni indemnización.
 
 # ESTRUCTURA (CONCISA)
 
-## 1. HECHOS INCUESTIONADOS (1-2 párrafos breves)
-${esEnf ? 'Contingencia firme' : 'Accidente firme'} (fecha, mecánica en 1 oración); prestaciones de la ART; ${esRev ? 'trámite y dictamen CM con %' : 'trámite CM si hubo'}; disconformidad del actor.
+## 1. HECHOS INCUESTIONADOS (1-2 párrafos)
+${esEnf ? 'Contingencia firme' : 'Accidente firme'} (fecha + mecánica en 1 oración); prestaciones ART; ${esRev ? 'trámite y dictamen CM con %' : 'trámite CM si hubo'}; disconformidad del actor.
 
-## 2. PERICIA MÉDICA (RESUMIDA)
-Empezá: "Al efecto y a fin de discernir la cuestión controvertida, este órgano jurisdiccional cuenta con la pericia médica presentada en fecha ${peritoMed.fecha_dictamen || '[FALTA: fecha pericia]'} por el ${peritoMed.perito_nombre ? 'Dr. ' + peritoMed.perito_nombre : '[FALTA: nombre del perito médico]'}, quien practicó el examen médico pericial:"
-Por cada región: diagnóstico + hallazgo principal + %. SIN transcribir cada grado de movimiento. Usá EXACTAMENTE los % "ACREDITADA".
-${incapAcredPsi != null && Number(incapAcredPsi) > 0 ? '' : 'Examen psíquico: mencioná en 1 oración que el perito no fijó incapacidad psíquica. NO uses "psicofísica".'}
+## 2. PERICIA (RESUMIDA)
+Empezá: "Al efecto y a fin de discernir la cuestión controvertida, este órgano jurisdiccional cuenta con la pericia médica presentada en fecha ${peritoMed.fecha_dictamen || '[FALTA]'} por el ${peritoMed.perito_nombre ? 'Dr. ' + peritoMed.perito_nombre : '[FALTA]'}, quien practicó el examen médico pericial:"
+Por región: diagnóstico + hallazgo principal + %. SIN cada grado de movimiento. % EXACTOS del bloque ACREDITADA.
+${incapAcredPsi != null && Number(incapAcredPsi) > 0 ? '' : 'Examen psíquico en 1 oración (perito no fijó incapacidad). NO uses "psicofísica".'}
 
-${bloqueImpugnaciones}
+${bloqueImp}
 
 ## 4. PREEXISTENCIAS
 ${(datos?.preexistencias_denunciadas?.length || 0) > 0
-  ? 'La demandada denunció preexistencias. Analizá BREVEMENTE: ¿misma región corporal? ¿prueba específica? Si solo invocó sin acreditar coincidencia anatómica, no se deducen.'
-  : 'No se denunciaron preexistencias o no se discutieron.'}
+  ? 'Denunciadas. Analizá BREVE: ¿misma región? ¿prueba específica? Si solo invocó sin acreditar coincidencia anatómica → no se deducen.'
+  : 'No se denunciaron o no se discutieron.'}
 
 ## 5. CONCLUSIÓN
-${bloqueRevisionCM}
+${bloqueRev}
 
-# FORMATO DEL OUTPUT (CRÍTICO)
-Primer carácter: 'R' de "Resolución:". Sin encabezados, sin romanos, sin nombre de juez.
-NO incluyas: IBM/edad/salarios; "Así lo voto"; encabezados de cuestión; headers Markdown.
-Sé CONCISO y llegá al cierre.`;
+# FORMATO
+Primer carácter: "R" de "Resolución:". Sin headers, sin romanos, sin nombre de juez. SIN IBM/edad/salarios. SIN "Así lo voto" (va en otra sección). Sé CONCISO.`;
 }
 
 // =============================================================================
@@ -738,11 +563,11 @@ export function buildIbmUserPrompt(chunks, datos, config, calculos) {
   const terminoFecha = esEnf ? 'la fecha de primera manifestación invalidante' : 'la fecha del accidente';
 
   return REGLA_DATOS +
-`TEXTO DEL EXPEDIENTE - SECCIÓN AFIP/RIPTE/IBM:
+`AFIP/RIPTE/IBM:
 
 ${chunks.afip}
 
-CONTEXTO - INICIO:
+CONTEXTO:
 
 ${chunks.header.slice(0, 3000)}
 
@@ -751,19 +576,19 @@ DATOS:
 ${JSON.stringify(datos, null, 2)}
 ${bloqueValoresPrecalculados(calculos, config, datos)}
 # TAREA
-Redactá la sección IBM + cierre de la Primera Cuestión.
+Sección IBM + cierre Primera Cuestión.
 
 # ESTRUCTURA
 
-## 1. INTRODUCCIÓN
+## 1. INTRO
 "A fin de determinar el ingreso base mensual, tendré en consideración el promedio mensual de todos los salarios devengados —de conformidad con lo establecido por el artículo 1° del Convenio N° 95 de la OIT— por el trabajador durante el año anterior a ${terminoFecha}, según las remuneraciones informadas por AFIP, actualizados mes a mes aplicándose la variación del índice RIPTE:"
 
-## 2. TABLA DE 12 MESES
+## 2. TABLA 12 MESES
 ${calculos?.salarios?.length > 0
   ? 'Transcribí:\n   ' + calculos.salarios.map(s => `  ${s.fechaAR}: $ ${s.bruto?.toLocaleString('es-AR') || ''} → $ ${s.actualizado?.toLocaleString('es-AR', { maximumFractionDigits: 2 }) || ''}`).join('\n   ')
-  : 'NO tenés tabla de salarios. OMITÍ la tabla y pasá al punto 3. NO INVENTES SALARIOS.'}
+  : 'NO hay tabla de salarios. OMITÍ la tabla y pasá al punto 3. NO INVENTES SALARIOS.'}
 
-## 3. VALORES CLAVE (TEXTUALES de "VALORES NUMÉRICOS A USAR")
+## 3. VALORES (TEXTUALES del bloque VALORES)
 - "RIPTE al mes de la contingencia: $ [valor]"
 - "RIPTE actual (último publicado): $ [valor]"
 - "Valor Ingreso Base Mensual (IBM) art. 12 LRT: $ [IBM bruto]"
@@ -771,14 +596,13 @@ ${calculos?.salarios?.length > 0
 - "IBM con intereses: $ [valor]"
 
 ## 4. EDAD
-"Teniendo en cuenta la fecha de nacimiento del actor —[FECHA]—, y ${terminoFecha} —[FECHA]—, tengo por acreditado que contaba con ${calculos?.edad || '[FALTA: edad]'} años a ${esEnf ? 'la fecha de la contingencia' : 'la fecha del siniestro'}."
+"Teniendo en cuenta la fecha de nacimiento del actor —[FECHA]—, y ${terminoFecha} —[FECHA]—, tengo por acreditado que contaba con ${calculos?.edad || '[FALTA]'} años a ${esEnf ? 'la fecha de la contingencia' : 'la fecha del siniestro'}."
 
 ## 5. CIERRE
 "Así lo voto (art. 57 inc. 4 ley 15.057)."
 
-# FORMATO DEL OUTPUT (CRÍTICO)
-Primer carácter: 'A' de "A fin de determinar el ingreso base mensual...". Sin encabezados, sin nombre de juez, sin romanos, sin Markdown.
-NO incluyas indemnización ni comparación RIPTE (van en Segunda). Terminá en "Así lo voto (art. 57 inc. 4 ley 15.057)." y nada más.`;
+# FORMATO
+Primer carácter: "A" de "A fin de determinar...". Sin encabezados, sin juez, sin romanos, sin Markdown. SIN indemnización ni comparación RIPTE (van en Segunda). Terminás en "Así lo voto (art. 57 inc. 4 ley 15.057)." y nada más.`;
 }
 
 // =============================================================================
@@ -795,15 +619,15 @@ export function buildSegundaUserPrompt(chunks, datos, config, calculos) {
   const terminoFecha = esEnf ? 'la primera manifestación invalidante'
     : esRev ? 'el hecho denunciado'
     : 'el accidente';
-  const termSec = terminoSecuelas(datos); // 'física' | 'psicofísica'
+  const termSec = terminoSecuelas(datos);
 
-  const bloque20pct = calculos?.esAccidente ? `
+  const bloque20 = calculos?.esAccidente ? `
 "Finalmente y tratándose de un accidente de trabajo corresponde adicionarle el 20% previsto por el art. 3 de la ley 26.773, alcanzando el monto total de condena la suma de [TOTAL] ([HIPÓTESIS B] + [INCREMENTO 20%])."
 
 "El monto al que asciende la indemnización por incapacidad laboral derivada de ${terminoHecho} sufrido en los términos de la Ley de Riesgos del Trabajo asciende a la suma de [TOTAL EN LETRAS] ([TOTAL EN PESOS])."` : `
 "El monto al que asciende la indemnización por incapacidad laboral derivada de ${terminoHecho}, en los términos de la Ley de Riesgos del Trabajo, asciende a la suma de [TOTAL EN LETRAS] ([TOTAL EN PESOS])."
 
-(NOTA: NO se aplica el +20% del art. 3 ley 26.773.)`;
+(NOTA: NO se aplica el +20%.)`;
 
   const bloque24432 = datos?.denuncia_inconst_ley_24432 ? `
 
@@ -811,7 +635,7 @@ export function buildSegundaUserPrompt(chunks, datos, config, calculos) {
 "La parte actora solicita la declaración de inconstitucionalidad de la ley 24.432 y la parte demandada solicita su aplicación: De acuerdo a la doctrina legal de la SCBA (causas L. 77.914, 'Zuccoli', sent. de 2-X-2002; L. 119.955, 'Duarte', sent. de 14-VIII-2019; L. 121.989, 'Mosiejchuk', sent. de 26-XII-2019; e.o.), se desestima la petición formulada por la parte actora (SCBA causas L. 93.064, 'Vas da Silva', sent. de 2-III-2011; L. 112.832, 'G., D. H.', sent. de 2-V-2013; L. 117.427, 'Caraballo', sent. de 20-V-2015; L. 118.434, 'Virgili', sent. de 12-IV-2017 y L. 125.474, 'Magyar', sent. de 31-VIII-2022; entre otras)."` : '';
 
   return REGLA_DATOS +
-`TEXTO DEL EXPEDIENTE - SECCIONES AFIP Y ALEGATOS:
+`AFIP Y ALEGATOS:
 
 ${chunks.afip.slice(0, 8000)}
 
@@ -824,36 +648,36 @@ DATOS:
 ${JSON.stringify(datos, null, 2)}
 ${bloqueValoresPrecalculados(calculos, config, datos)}
 # TAREA
-Redactá ÚNICAMENTE el contenido del voto de la SEGUNDA CUESTIÓN del magistrado que vota primero. NO incluyas encabezado ni adhesiones.
+Voto SEGUNDA CUESTIÓN del primero. SIN encabezado ni adhesiones.
 
-# RECORDATORIO CRÍTICO
-% en la fórmula = ACREDITADO (${calculos?.porcentaje || '[FALTA]'}%). Naturaleza: ${termSec.toUpperCase()} — usá "${termSec}", NO el otro.
+# RECORDATORIO
+% fórmula = ACREDITADO (${calculos?.porcentaje || '[FALTA]'}%). Naturaleza: ${termSec.toUpperCase()} ("${termSec}", NO el otro).
 
-# ESTRUCTURA OBLIGATORIA
+# ESTRUCTURA
 
 ## 1. SÍNTESIS
 "De acuerdo a los hechos acreditados en la cuestión que antecede se probó que la parte actora como consecuencia de ${terminoHecho} ${esEnf ? 'padecida' : esRev ? 'denunciado' : 'sufrido'} presenta secuelas ${termSec}s que la incapacitan en un [% = ${calculos?.porcentaje || ''}%] de la t.o. Asimismo quedó acreditado que su edad al momento de ${terminoFecha} era de [edad] años y que el IBM bruto AFIP asciende a la suma de [IBM BRUTO]."
 
-## 2. CÁLCULO HIPÓTESIS (a) — TASA ACTIVA BNA
+## 2. HIPÓTESIS (a) — BNA
 "Finalmente correspondería calcular el interés equivalente al promedio de la tasa activa cartera general nominal anual vencida a treinta (30) días del Banco de la Nación Argentina previsto en el inc. 2 del art. 11 de la ley 27.348 que modifica el art. 12 LRT. Dicho interés es de [INTERESES BNA] al que sumándole el ibm de [IBM BRUTO], se arriba al ibm con intereses de [IBM CON INTERESES]."
 "La fórmula entonces determina una indemnización de [HIPÓTESIS A] (53 × [IBM CON INTERESES] × 65 / [edad] × [%])."
 
-## 3. RAZONAMIENTO CONSTITUCIONAL (mismo contenido de siempre, conciso)
+## 3. RAZONAMIENTO CONSTITUCIONAL
 a) "Ahora bien, y en atención al pedido formulado por la parte actora en su escrito de demanda, se impone realizar un análisis económico de la cuestión a debate."
-b) Finalidad del art. 11 ley 27.348 (mejora reparación, carácter alimentario).
+b) Finalidad art. 11 ley 27.348 (reparación, carácter alimentario).
 c) DNU 669/19 inconstitucional ("Muzychuk").
-d) Licuación del capital por inflación.
+d) Licuación por inflación.
 e) Cita "Barrios": "el alza generalizada de los precios y la depreciación monetaria, agravados en los últimos tiempos y fuertemente en el último bienio, parece una constante".
 f) SCBA ("Monchiero", "Amaya") y CSJN ("Aquino", "Milone", "Ascua", "Vizzoti"): preferente tutela.
 g) Inc. 2 art. 12 LRT incompatible con arts. 14 bis y 17 CN.
 
-## 4. COMPARATIVA NUMÉRICA (valores TEXTUALES)
+## 4. COMPARATIVA (TEXTUALES)
 "Adviértase que la fórmula indemnizatoria utilizando la tasa de interés devengada entre ${terminoFecha} ([fecha]) hasta la actualidad calculada según el promedio de la tasa activa cartera general del Banco de la Nación Argentina arroja un ibm de [IBM CON INTERESES] y una indemnización de [HIPÓTESIS A]; mientras que si se aplicara en igual período el índice 'ripte', el ibm se elevaría a [IBM CON RIPTE] y la indemnización alcanzaría el importe de [HIPÓTESIS B] (último ripte publicado: $ [RIPTE ACTUAL] / ripte mes ${esEnf ? 'manifestación' : 'accidente'}: $ [RIPTE ACCIDENTE] = coef. [COEF]. ibm de [IBM BRUTO] × coef [COEF] = [IBM CON RIPTE]; 53 × [IBM CON RIPTE] × 65 / [edad] × [%])."
 
-## 5. INCONSTITUCIONALIDAD Y CONDENA
+## 5. INCONST. + CONDENA
 "Que, en consecuencia, corresponde declarar la inconstitucionalidad del inc. 2 del art. 12 LRT en este caso y disponer que el ingreso base mensual se actualice conforme al índice RIPTE hasta la fecha de pago, asegurando así la integridad del crédito y el respeto del espíritu protector que informa nuestro ordenamiento (art. 14 bis CN)."
 "Por ello y teniendo en cuenta los hechos probados, de acuerdo con lo previsto por los arts. 6 y 14.2 de la ley 24.557, corresponde —teniendo en cuenta la edad del actor a ${terminoFecha} ([edad] años), la minusvalía de su capacidad laborativa ([%]) y el IBM con RIPTE [IBM CON RIPTE]— una indemnización que asciende a la suma de [HIPÓTESIS B] (53 × [IBM CON RIPTE] × 65 / [edad] × [%]) (arts. 6 y 14.2 ley 24.557, art. 12 ley 27.348)."
-${bloque20pct}
+${bloque20}
 
 ## 6. INTERESES POR MORA
 "Intereses: A partir de la mora en el pago de la presente indemnización será de aplicación lo establecido por el artículo 770 del Código Civil y Comercial acumulándose los intereses al capital, y el producido devengará un interés equivalente al promedio de la tasa activa cartera general nominal anual vencida a treinta (30) días del Banco de la Nación Argentina, hasta la efectiva cancelación (art. 12 ley 24.557 según texto ley 27.348)."
@@ -869,12 +693,12 @@ ${bloque24432}
 "Así lo voto (art. 57 inc. 4 ley 15.057)."
 
 # IMPORTANTE
-- NO incluyas adhesiones.
-- ${esEnf ? 'ENFERMEDAD: NO menciones el +20%.' : calculos?.esAccidente ? 'ACCIDENTE: SÍ aplicá el +20%.' : 'NO se aplica +20%.'}`;
+- SIN adhesiones.
+- ${esEnf ? 'ENFERMEDAD: SIN +20%.' : calculos?.esAccidente ? 'ACCIDENTE: SÍ +20%.' : 'SIN +20%.'}`;
 }
 
 // =============================================================================
-// 6. SENTENCIA (DISPOSITIVO FINAL)
+// 6. SENTENCIA (DISPOSITIVO)
 // =============================================================================
 
 export function buildSentenciaUserPrompt(chunks, datos, config, calculos) {
@@ -892,18 +716,17 @@ export function buildSentenciaUserPrompt(chunks, datos, config, calculos) {
   const esRev = tipo === 'REVISION_CM';
   const artsCondena = `arts. 6.1, 8.1 y 14.2.a ley 24.557, art. 12 ley 27.348${calculos?.esAccidente ? ', art. 3 ley 26.773' : ''}${esRev ? ', art. 2 inc. j ley 15.057' : ''}`;
 
-  // CAMBIO 7 v2.6: en revisión, el inciso 2° NO reforma el dictamen ni declara
-  // incapacidad (eso quedó en la Resolución). Solo hace lugar y condena al pago.
-  const condenaPrincipalRev = esRev && haceLugar
-    ? `"Hacer lugar a la acción de revisión interpuesta por [NOMBRE ACTOR del JSON] contra [DEMANDADA del JSON], condenando a [DEMANDADA del JSON] a abonar la suma de [TOTAL EN LETRAS] ([TOTAL EN PESOS]) en el plazo de diez (10) días de quedar firme el presente pronunciamiento (${artsCondena})."`
+  // v2.6: revisión sin reformar/declarar en el dispositivo
+  const condenaRev = esRev && haceLugar
+    ? `"Hacer lugar a la acción de revisión interpuesta por [NOMBRE ACTOR] contra [DEMANDADA], condenando a [DEMANDADA] a abonar la suma de [TOTAL EN LETRAS] ([TOTAL EN PESOS]) en el plazo de diez (10) días de quedar firme el presente pronunciamiento (${artsCondena})."`
     : null;
 
   return REGLA_DATOS +
-`CONTEXTO - DATOS BÁSICOS:
+`CONTEXTO:
 
 ${chunks.header.slice(0, 5000)}
 
---- FINAL DEL EXPEDIENTE ---
+--- FINAL ---
 
 ${chunks.final}
 
@@ -911,30 +734,30 @@ DATOS:
 
 ${JSON.stringify(datos, null, 2)}
 ${bloqueValoresPrecalculados(calculos, config, datos)}
-# TIPO DE CASO
+# TIPO
 ${tipo === 'ACCIDENTE'
-  ? 'ACCIDENTE — citá art. 3 ley 26.773 en inciso 2° y usá "accidente de trabajo".'
+  ? 'ACCIDENTE: art. 3 ley 26.773 en inciso 2°, "accidente de trabajo".'
   : esEnf
-  ? 'ENFERMEDAD — NO cites art. 3 ley 26.773 ni "accidente".'
-  : 'ACCIÓN DE REVISIÓN CM — inciso 2° solo hace lugar y condena al pago (la reforma del dictamen ya está en la Resolución). Citá art. 2 inc. j ley 15.057.'}
+  ? 'ENFERMEDAD: SIN art. 3 ley 26.773, SIN "accidente".'
+  : 'REVISIÓN CM: inciso 2° solo hace lugar y condena (la reforma ya está en Resolución). Art. 2 inc. j ley 15.057.'}
 
 # TAREA
-Redactá la SENTENCIA DISPOSITIVO. NO incluyas "S E N T E N C I A" ni "AUTOS Y VISTO". Empezá directo con los incisos del RESUELVE.
+DISPOSITIVO. SIN "S E N T E N C I A" ni "AUTOS Y VISTO". Directo a los incisos.
 
-# INCISOS EN ORDEN
+# INCISOS
 
 ## 1°) DECLARACIONES PREVIAS
 ${haceLugar
-  ? '"Declarar la inconstitucionalidad sobreviniente e inaplicabilidad al caso del inc. 2 del art. 12 ley 24.557 (texto ley 27.348), por violentar los arts. 14 bis, 17 y 33 CN."\n\n(Si hubo prescripción rechazada: "Rechazar la excepción de prescripción opuesta por la parte demandada con costas a su cargo.")\n\n(Si el actor planteó inconst. ley 24.432: "Desestímese el pedido de declaración de inconstitucionalidad de la ley 24.432 solicitado por la parte actora.")'
+  ? '"Declarar la inconstitucionalidad sobreviniente e inaplicabilidad al caso del inc. 2 del art. 12 ley 24.557 (texto ley 27.348), por violentar los arts. 14 bis, 17 y 33 CN."\n\n(Si prescripción rechazada: "Rechazar la excepción de prescripción opuesta...".)\n(Si actor planteó inconst. ley 24.432: "Desestímese el pedido de declaración de inconstitucionalidad de la ley 24.432 solicitado por la parte actora.")'
   : '"Declarar abstracto las impugnaciones de inconstitucionalidad opuestas por la parte actora."'}
 
 ## 2°) CONDENA PRINCIPAL
 ${haceLugar
-  ? (condenaPrincipalRev || `"Hacer lugar a la demanda incoada por [NOMBRE ACTOR del JSON] cuyo pago de [TOTAL EN LETRAS] ([TOTAL EN PESOS]) deberá afrontar [DEMANDADA del JSON] en el plazo de diez (10) días de quedar firme el presente pronunciamiento, conforme todo el detalle realizado por el reclamo de autos (${artsCondena}; art. 345 CPCC y 89 ley 15.057). Por las secuelas ${terminoSecuelas(datos)}s que padece, que lo/la incapacitan en el [%] de la t.o."`)
-  : `"Rechazar en un todo la demanda${esRev ? ' de revisión' : ''} por reclamo indemnizatorio leyes 24.557${calculos?.esAccidente !== false ? ' y 26.773' : ''}, con sustento en ${esEnf ? 'la enfermedad profesional' : 'el accidente'} que integra estas actuaciones, padecido por [NOMBRE ACTOR del JSON], contra [DEMANDADA del JSON] (art. 726 CCC)."`}
+  ? (condenaRev || `"Hacer lugar a la demanda incoada por [NOMBRE ACTOR] cuyo pago de [TOTAL EN LETRAS] ([TOTAL EN PESOS]) deberá afrontar [DEMANDADA] en el plazo de diez (10) días de quedar firme el presente pronunciamiento, conforme todo el detalle realizado por el reclamo de autos (${artsCondena}; art. 345 CPCC y 89 ley 15.057). Por las secuelas ${terminoSecuelas(datos)}s que padece, que lo/la incapacitan en el [%] de la t.o."`)
+  : `"Rechazar en un todo la demanda${esRev ? ' de revisión' : ''} por reclamo indemnizatorio leyes 24.557${calculos?.esAccidente !== false ? ' y 26.773' : ''}, con sustento en ${esEnf ? 'la enfermedad profesional' : 'el accidente'} que integra estas actuaciones, padecido por [NOMBRE ACTOR], contra [DEMANDADA] (art. 726 CCC)."`}
 
 ${haceLugar ? `
-## 3°) INSTRUCCIONES CBU (TEXTO ÍNTEGRO — COPIAR LITERAL)
+## 3°) CBU (LITERAL)
 "En atención a lo dispuesto por el art. 17 de la ley 27.348; el monto de condena, se abonará por la demandada obligada al pago, en forma directa en la cuenta bancaria sueldo – ley 26.590 - del trabajador (actor). A tal fin, se debe adjuntar constancia de CBU del acreedor judicial e informar sus datos en el expediente: nombre y apellido completo, CBU, CUIT, DNI, número y tipo de cuenta, banco, sucursal y localidad, correo electrónico, en el cuerpo del escrito que presenten.
 
 Si el trabajador no contara con cuenta sueldo a su exclusiva titularidad – ley 26.590 -, bajo juramento de decir verdad, que no cuenta con la misma, podrá denunciar cualquier otra cuenta bancaria de la que sea único y exclusivo titular, no admitiéndose cuentas que contaren con otros titulares o, en su defecto, abrir a su exclusiva titularidad una cuenta gratuita en el Banco de la Provincia de Buenos Aires. (Cuenta DNI).
@@ -949,7 +772,7 @@ La parte obligada al pago deberá acreditar en autos el debido cumplimiento de l
 
 ## ${haceLugar ? '5°' : '3°'}) COSTAS
 ${haceLugar
-  ? '"Imponer las costas del presente juicio a cargo de la demandada [DEMANDADA del JSON] en su condición de vencida (art. 24 Ley 15.057)."'
+  ? '"Imponer las costas del presente juicio a cargo de la demandada [DEMANDADA] en su condición de vencida (art. 24 Ley 15.057)."'
   : '"Las costas del juicio deben imponerse a la parte actora en su condición de vencida (art. 24 ley 15.057). Quien cuenta con los beneficios de gratuidad y litigar sin gastos (arts. 25 y 27 ley 15.057; arts. 1° y 2° ley 12.200)."'}
 
 ## ${haceLugar ? '6°' : '4°'}) HONORARIOS
@@ -960,25 +783,24 @@ Por la parte demandada: ${nombreDem} en la suma de ${honDem}.
 Todos con más los aportes legales correspondientes e IVA en caso de corresponder (arts. 2, 9, 11, 13 a 16, 21, 23, 26, 28, 51 y 54 ley 14.967)."
 
 ## ${haceLugar ? '7°' : '5°'}) HONORARIOS PERITOS
-"Asimismo regúlanse los honorarios del perito médico ${datos?.pericia_medica?.perito_nombre ? 'Dr. ' + datos.pericia_medica.perito_nombre : '[FALTA: nombre perito médico]'} en la suma de ${honPerito}, con más el 10% (ley 6.742) e IVA para el caso de corresponder."
+"Asimismo regúlanse los honorarios del perito médico ${datos?.pericia_medica?.perito_nombre ? 'Dr. ' + datos.pericia_medica.perito_nombre : '[FALTA]'} en la suma de ${honPerito}, con más el 10% (ley 6.742) e IVA para el caso de corresponder."
 
-${honPsi && datos?.pericia_psiquiatrica?.tiene ? `"Regúlanse los honorarios del/de la perito psiquiatra/psicólogo/a ${datos?.pericia_psiquiatrica?.perito_nombre ? 'Dr. ' + datos.pericia_psiquiatrica.perito_nombre : '[FALTA: nombre perito psi]'} en la suma de ${honPsi}, con más los aportes de ley e IVA en caso de corresponder."` : '(No hubo perito psi separado — omitir regulación de honorarios psi.)'}
+${honPsi && datos?.pericia_psiquiatrica?.tiene ? `"Regúlanse los honorarios del/de la perito psiquiatra/psicólogo/a ${datos?.pericia_psiquiatrica?.perito_nombre ? 'Dr. ' + datos.pericia_psiquiatrica.perito_nombre : '[FALTA]'} en la suma de ${honPsi}, con más los aportes de ley e IVA en caso de corresponder."` : '(SIN perito psi separado — omitir honorarios psi.)'}
 
 ${haceLugar ? `
-## 8°) INSTRUCCIONES PAGO HONORARIOS (TEXTO ÍNTEGRO)
+## 8°) PAGO HONORARIOS (LITERAL)
 "Los honorarios se abonarán directamente en las cuentas bancarias de los profesionales (abogados y peritos), quienes deben adjuntar constancia de CBU y factura correspondiente e informar sus datos en el expediente: nombre y apellido completo, CBU, CUIT, DNI, número y tipo de cuenta, banco, sucursal y localidad, correo electrónico, en el cuerpo del escrito que presenten."
 ` : ''}
 
-## CIERRE OBLIGATORIO
+## CIERRE
 "REGISTRESE, NOTIFIQUESE, con transcripción de lo dispuesto en el art. 54 Ley 14.967 y oportunamente ARCHIVESE."
 
-IMPORTANTE: tu output TERMINA en "...ARCHIVESE." NO transcribas el texto del art. 54 — el sistema lo agrega por código a continuación. NO escribas nada después de "ARCHIVESE."
+IMPORTANTE: tu output TERMINA en "...ARCHIVESE." NO transcribas el art. 54 — lo agrega el código. Nada después de "ARCHIVESE."
 
-# FORMATO DEL OUTPUT (CRÍTICO)
-Primer carácter: "1" del inciso "1°)". Sin "SENTENCIA"/"RESUELVE"/preámbulos/Markdown.
-- Numerá los incisos como arriba.
-- ${esEnf ? 'ENFERMEDAD: NO cites art. 3 ley 26.773.' : esRev ? 'REVISIÓN CM: citá art. 2 inc. j ley 15.057.' : 'ACCIDENTE: SÍ citá art. 3 ley 26.773.'}
-- Si rechaza: omití CBU, intereses por mora, instrucciones de pago de honorarios.`;
+# FORMATO
+Primer carácter: "1" de "1°)". Sin "SENTENCIA"/"RESUELVE"/preámbulos/Markdown.
+${esEnf ? 'ENFERMEDAD: SIN art. 3 ley 26.773.' : esRev ? 'REVISIÓN: SÍ art. 2 inc. j ley 15.057.' : 'ACCIDENTE: SÍ art. 3 ley 26.773.'}
+Si rechaza: SIN CBU, intereses por mora, instrucciones pago honorarios.`;
 }
 
 // =============================================================================
@@ -1026,10 +848,6 @@ export function detectarVarianteWeiss(calculos, datos) {
   return 2;
 }
 
-// =============================================================================
-// ENCABEZADO OFICIAL DE LA SENTENCIA (entre Acuerdo y dispositivo)
-// =============================================================================
-
 export function buildEncabezadoSentencia(varianteWeiss) {
   const formula = varianteWeiss === 3 ? 'por unanimidad' : 'por mayoría';
   return `**SENTENCIA**
@@ -1038,14 +856,9 @@ AUTOS Y VISTOS: CONSIDERANDO: Lo decidido en el Acuerdo que antecede y los funda
 }
 
 // =============================================================================
-// CIERRE — TRANSCRIPCIÓN ART. 54 LEY 14.967 (NUEVO v2.6)
+// CIERRE — TRANSCRIPCIÓN ART. 54 LEY 14.967 (texto LITERAL — bajo pena de nulidad)
 // =============================================================================
-//
-// Texto LITERAL del art. 54 ley 14.967. La norma exige transcripción bajo pena
-// de nulidad, por eso va por código (no por el LLM). Se concatena DESPUÉS del
-// dispositivo (que termina en "...ARCHIVESE.").
-//
-// USO en NewSentence.jsx — después de agregar el dispositivo a fullSentence:
+// USO en NewSentence.jsx, después del dispositivo:
 //     import { buildCierreArt54 } from './sentenciaPrompts'
 //     ...
 //     fullSentence += dispositivo + '\n\n'
