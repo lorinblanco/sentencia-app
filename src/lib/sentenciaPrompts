@@ -1,29 +1,33 @@
 // src/lib/sentenciaPrompts.js
 // =============================================================================
-// SENTENCIA — PROMPTS v2.6.1 (compresión post-v2.6)
+// SENTENCIA — PROMPTS v2.6.2 (correcciones post-revisión STEFANELLI 20644)
 // Tribunal del Trabajo N° 5 - Departamento Judicial de Quilmes
 // Mayo 2026
 // =============================================================================
 //
-// Cambios v2.6 → v2.6.1: solo compresión de prompts. Funcionalidad idéntica.
-// El SYSTEM_PROMPT y las instrucciones repetidas en cada prompt se reescriben
-// más compactos para reducir el consumo de ITPM por llamada. Las 9 reglas
-// de v2.6 se conservan TODAS, solo más cortas.
-//
-// Recordatorio v2.5 → v2.6 (9 correcciones, todas vigentes en v2.6.1):
-//   1. Concisión Antecedentes/Resolución.
-//   2. Impugnación ≠ contestación (test temporal).
-//   3. Pluralidad de hechos (accidentes_adicionales[]).
-//   4. Oficios AFIP/ARCA y SRT en Antecedentes.
-//   5. Art. 54 ley 14.967 por código (buildCierreArt54).
-//   6. Física vs psicofísica (terminoSecuelas).
-//   7. Dispositivo de revisión sin reformar/declarar.
-//   8. Muletilla "prueba técnica que desvirtúe..." prohibida.
-//   9. Si NO hubo impugnación real, no se redacta bloque.
+// Cambios v2.6.1 → v2.6.2 (5 correcciones, ninguna afecta consumo de ITPM):
+//   1. Preexistencias: si NO se denunciaron, OMITIR el bloque (no escribir
+//      "no se han denunciado preexistencias..."). Antes mencionaba el hecho
+//      negativo; ahora pasa de largo.
+//   2. Verbos declarativos en Antecedentes: regla explícita de NO presentar
+//      los hechos de la demanda como afirmaciones directas ("El actor ingresó
+//      a trabajar..."). Usar verbos del actor: "manifiesta que", "refiere
+//      que", "denuncia que", "expresa que", "sostiene que", "relata que",
+//      "reclama". Vale para TODO el relato de la demanda.
+//   3. Cierre de Resolución en REVISION_CM: incorporar la frase "No hallando
+//      razones que ameriten apartarme de lo dictaminado por el perito médico,
+//      considerándolo fundado..." como fundamento, antes de la reforma del
+//      dictamen de la CM.
+//   4. Voto de Weiss: en buildAdhesionSegunda, agregar doble salto de línea
+//      entre "DIJO:" y el contenido del voto, para que word.js aplique negrita
+//      solo a la primera línea ("A LA SEGUNDA CUESTIÓN PLANTEADA ... DIJO:")
+//      y NO al cuerpo del voto.
+//   5. buildEncabezadoSentencia: quitar los ** alrededor de "SENTENCIA"
+//      (quedaban literales porque word.js no convierte markdown a bold).
 // =============================================================================
 
 // =============================================================================
-// SYSTEM PROMPT (comprimido)
+// SYSTEM PROMPT (sin cambios respecto v2.6.1)
 // =============================================================================
 
 export const SYSTEM_PROMPT = `Sos integrante del Tribunal del Trabajo N° 5 de Quilmes, Pcia. Buenos Aires. Redactás sentencias laborales en el ESTILO del tribunal, SINTÉTICAS y precisas.
@@ -113,7 +117,7 @@ Tu output se concatena MECÁNICAMENTE con otras secciones. Por eso:
 6. Cada sección empieza EXACTAMENTE con la frase que el prompt indique.`;
 
 // =============================================================================
-// HELPERS
+// HELPERS (sin cambios)
 // =============================================================================
 
 function tipoFromCalculos(calculos, datos) {
@@ -213,7 +217,7 @@ Cualquier monto que insertes DEBE estar en esta lista. % = ÚNICO valor "ACREDIT
 }
 
 // =============================================================================
-// 1. EXTRACT
+// 1. EXTRACT (sin cambios respecto v2.6.1)
 // =============================================================================
 
 export function buildExtractUserPrompt(chunks) {
@@ -358,7 +362,7 @@ ${cuerpoExpediente}`;
 }
 
 // =============================================================================
-// 2. ANTECEDENTES
+// 2. ANTECEDENTES (v2.6.2: regla de verbos declarativos)
 // =============================================================================
 
 export function buildAntecedentesUserPrompt(chunks, datos, config) {
@@ -415,6 +419,24 @@ ${JSON.stringify(datos, null, 2)}
 # CONCISIÓN
 Redactá Antecedentes ~MITAD de un relato exhaustivo. Conservá datos duros (nombres, fechas, montos, %); resumí el relato del hecho en 2-3 oraciones; lesiones en enumeración breve; postura de la demandada en 2-3 oraciones.
 
+# VERBOS DECLARATIVOS (CRÍTICO)
+Al referir los hechos de la demanda, NUNCA los presentes en modo afirmativo como si fueran hechos probados por el tribunal. Acá estás contando lo que el actor DICE en la demanda, no lo que el tribunal tiene por probado. Usá SIEMPRE verbos declarativos del actor:
+- "Manifiesta que ingresó a trabajar el [FECHA]..."
+- "Refiere que el día [FECHA] se encontraba realizando..."
+- "Denuncia haber sufrido [LESIÓN]..."
+- "Expresa que sus tareas consistían en..."
+- "Sostiene que el empleador..."
+- "Relata que..."
+- "Reclama una incapacidad del [X]%..."
+
+Esto vale para TODO el relato de la demanda (ingreso laboral, empleador, tareas, jornada, mecánica del accidente, diagnóstico, alta, planteos). NO sólo la mecánica.
+
+INCORRECTO (afirmaciones directas que parecen hechos probados): "El actor ingresó a trabajar el 01/06/2010..." / "El actor se desempeñó como técnico..." / "Sufrió un esguince de tobillo..."
+CORRECTO: "Manifiesta que ingresó a trabajar el 01/06/2010..." / "Refiere haberse desempeñado como técnico..." / "Denuncia haber sufrido un esguince de tobillo..."
+
+Para la contestación, verbos declarativos de la demandada:
+- "Niega que..." / "Opone falta de legitimación..." / "Alega que..." / "Sostiene que..." / "Solicita el rechazo de la demanda..." / "Defiende la constitucionalidad de..."
+
 # TIPO
 ${tipo} — usá "${terminoHecho}".
 ${bloqueRev}${bloquePlural}
@@ -428,16 +450,16 @@ ${bloqueRev}${bloquePlural}
 
 # CONTENIDO (BREVE)
 1. Demanda: fecha + letrado actor (nombre + Tº/Fº + colegio).
-2. Actor: nombre, DNI, CUIL, fecha nac., domicilio, tareas.
-3. Empleador: nombre, CUIT, tareas/horario (breve).
+2. Actor: nombre, DNI, CUIL, fecha nac., domicilio, tareas (con verbos declarativos: "manifiesta", "refiere").
+3. Empleador: nombre, CUIT, tareas/horario (breve). "Refiere haberse desempeñado para [EMPLEADOR]..."
 4. Demandada: nombre, CUIT, domicilio.
-5. Relato del ${esEnf ? 'cuadro' : 'siniestro'} (2-3 oraciones; si hay pluralidad, CADA hecho).
-6. Diagnóstico y alta (breve).
-7. Incapacidad RECLAMADA (valores arriba).
+5. Relato del ${esEnf ? 'cuadro' : 'siniestro'} (2-3 oraciones; si hay pluralidad, CADA hecho). "Relata que..." / "Denuncia que..."
+6. Diagnóstico y alta (breve). "Manifiesta que fue asistido..." / "Refiere haber recibido el alta..."
+7. Incapacidad RECLAMADA (valores arriba). "Reclama una incapacidad..."
 8. ${esRev ? 'Trámite CM, dictamen, disconformidad.' : 'Mención breve si hubo trámite CM.'}
-9. Inconstitucionalidades planteadas (lista breve).
-10. Monto reclamado.
-11. Contestación: fecha + letrado + postura (2-3 oraciones). Preexistencias si las hay.
+9. Inconstitucionalidades planteadas (lista breve). "Planteó la inconstitucionalidad de..."
+10. Monto reclamado. "Estimó su reclamo en..."
+11. Contestación: fecha + letrado + postura (2-3 oraciones, con verbos declarativos de la demandada). Preexistencias si las hay.
 12. Auto de apertura a prueba.
 13. Dictamen pericial: SOLO mencionar que se presentó en fecha [FECHA] por Dr. [NOMBRE]. Sin conclusiones acá.
 14. Impugnaciones: ${huboImpugnacionReal(datos)
@@ -451,7 +473,7 @@ Primer carácter: "A" de "Antecedentes:". No "Así lo voto" acá.`;
 }
 
 // =============================================================================
-// 3. RESOLUCIÓN
+// 3. RESOLUCIÓN (v2.6.2: preexistencias omitidas + cierre revisión con fundamento)
 // =============================================================================
 
 export function buildResolucionUserPrompt(chunks, datos, config) {
@@ -467,21 +489,31 @@ export function buildResolucionUserPrompt(chunks, datos, config) {
   const peritoMed = datos?.pericia_medica || {};
   const peritoPsi = datos?.pericia_psiquiatrica || {};
   const impugnoReal = huboImpugnacionReal(datos);
+  const hayPreexistencias = (datos?.preexistencias_denunciadas?.length || 0) > 0;
 
   const incapAcredFis = acr.fisica_porcentaje;
   const incapAcredPsi = acr.psiquica_porcentaje;
   const incapAcredTot = acr.total_porcentaje;
 
+  // CAMBIO v2.6.2: cierre de REVISION_CM ahora incluye la frase de fundamento
+  // ("no hallando razones para apartarme...") ANTES de la reforma del dictamen.
   const bloqueRev = esRev ? `
 
 # REVISIÓN CM
 Controvertido: % CM (${datos?.tramite_cm?.incapacidad_cm_porcentaje ?? '[FALTA]'}%) vs % pericia (${incapAcredTot ?? '[FALTA]'}%).
 Pericia mayor → reformar + reconocer el mayor. Igual → confirmar. Menor → reducir.
-Cierre (acá REFORMÁS y DECLARÁS, NO en el dispositivo): "En consecuencia, corresponde reformar el dictamen de la Comisión Médica N° [X] de fecha [X] y declarar que el actor es portador de una incapacidad ${termSec} parcial y permanente del [X]% de la T.O. por ${terminoHecho}, conforme art. 2 inc. j ley 15.057 y art. 14.2 LRT."
+
+CIERRE OBLIGATORIO (en este orden — primero fundamentar la adopción del % de la pericia, después reformar el dictamen):
+
+"No hallando razones que ameriten apartarme de lo dictaminado por el perito médico, considerando que su informe se encuentra debidamente fundado y consistente con las constancias de autos${impugnoReal ? ', y habiendo el perito respondido satisfactoriamente las observaciones formuladas' : ''}, tengo por probado que el actor es portador de una incapacidad ${termSec} parcial y permanente del [X]% de la T.O. por ${terminoHecho}.
+
+En consecuencia, siendo que dicho porcentaje resulta superior al determinado por la Comisión Médica N° [Y] ([Z]%), corresponde reformar el dictamen de la Comisión Médica N° [Y] de fecha [FECHA] y declarar que el actor es portador de la mencionada incapacidad, conforme art. 2 inc. j) ley 15.057 y art. 14.2 LRT."
+
+(Si la pericia confirma el % de la CM, ajustá el segundo párrafo a "siendo que dicho porcentaje resulta coincidente con..."; si es menor, "siendo que dicho porcentaje resulta inferior a...")
 ` : `
 
 # CIERRE
-"No hallando razones que ameriten apartarme de lo dictaminado por el perito médico, tengo por probado que el actor es portador de una incapacidad ${termSec} parcial y permanente del [X]% de la T.O. por ${terminoHecho} sufrido en autos (art. 57 inc. 5 ley 15.057; arts. 6 y 14.2 LRT)."
+"No hallando razones que ameriten apartarme de lo dictaminado por el perito médico, considerando que su informe se encuentra debidamente fundado y consistente con las constancias de autos, tengo por probado que el actor es portador de una incapacidad ${termSec} parcial y permanente del [X]% de la T.O. por ${terminoHecho} sufrido en autos (art. 57 inc. 5 ley 15.057; arts. 6 y 14.2 LRT)."
 `;
 
   const peritoPsiBloque = peritoPsi.tiene ? `
@@ -493,7 +525,20 @@ Cierre (acá REFORMÁS y DECLARÁS, NO en el dispositivo): "En consecuencia, cor
 Resumí BREVE fundamentos y respuesta del perito (con fechas). NO uses la muletilla prohibida.
 ` : `
 ## 3. IMPUGNACIONES
-NO hubo impugnación posterior al dictamen. NO redactes bloque de impugnaciones. NO conviertas planteos de la contestación en impugnación. Pasá a preexistencias/conclusión.
+NO hubo impugnación posterior al dictamen. NO redactes bloque de impugnaciones. NO conviertas planteos de la contestación en impugnación. Pasá a la conclusión.
+`;
+
+  // CAMBIO v2.6.2: si NO hay preexistencias denunciadas, OMITIR el bloque
+  // entero (no escribir "no se han denunciado preexistencias..."). El bloque
+  // sólo aparece si efectivamente hubo denuncia de preexistencias.
+  const bloquePreex = hayPreexistencias ? `
+
+## 4. PREEXISTENCIAS
+La demandada denunció preexistencias. Analizá BREVE: ¿misma región? ¿prueba específica? Si solo invocó sin acreditar coincidencia anatómica → no se deducen.
+` : `
+
+## 4. PREEXISTENCIAS
+NO se denunciaron preexistencias. OMITÍ ESTE PUNTO POR COMPLETO — NO escribas ninguna frase sobre preexistencias, ni siquiera para decir que no se denunciaron. Pasá directamente del punto anterior (impugnaciones o pericia) a la CONCLUSIÓN.
 `;
 
   return REGLA_DATOS +
@@ -540,11 +585,7 @@ Por región: diagnóstico + hallazgo principal + %. SIN cada grado de movimiento
 ${incapAcredPsi != null && Number(incapAcredPsi) > 0 ? '' : 'Examen psíquico en 1 oración (perito no fijó incapacidad). NO uses "psicofísica".'}
 
 ${bloqueImp}
-
-## 4. PREEXISTENCIAS
-${(datos?.preexistencias_denunciadas?.length || 0) > 0
-  ? 'Denunciadas. Analizá BREVE: ¿misma región? ¿prueba específica? Si solo invocó sin acreditar coincidencia anatómica → no se deducen.'
-  : 'No se denunciaron o no se discutieron.'}
+${bloquePreex}
 
 ## 5. CONCLUSIÓN
 ${bloqueRev}
@@ -554,7 +595,7 @@ Primer carácter: "R" de "Resolución:". Sin headers, sin romanos, sin nombre de
 }
 
 // =============================================================================
-// 4. IBM + CIERRE PRIMERA CUESTIÓN
+// 4. IBM + CIERRE PRIMERA CUESTIÓN (sin cambios)
 // =============================================================================
 
 export function buildIbmUserPrompt(chunks, datos, config, calculos) {
@@ -606,7 +647,7 @@ Primer carácter: "A" de "A fin de determinar...". Sin encabezados, sin juez, si
 }
 
 // =============================================================================
-// 5. SEGUNDA CUESTIÓN
+// 5. SEGUNDA CUESTIÓN (sin cambios)
 // =============================================================================
 
 export function buildSegundaUserPrompt(chunks, datos, config, calculos) {
@@ -698,7 +739,7 @@ ${bloque24432}
 }
 
 // =============================================================================
-// 6. SENTENCIA (DISPOSITIVO)
+// 6. SENTENCIA (DISPOSITIVO) (sin cambios)
 // =============================================================================
 
 export function buildSentenciaUserPrompt(chunks, datos, config, calculos) {
@@ -716,7 +757,6 @@ export function buildSentenciaUserPrompt(chunks, datos, config, calculos) {
   const esRev = tipo === 'REVISION_CM';
   const artsCondena = `arts. 6.1, 8.1 y 14.2.a ley 24.557, art. 12 ley 27.348${calculos?.esAccidente ? ', art. 3 ley 26.773' : ''}${esRev ? ', art. 2 inc. j ley 15.057' : ''}`;
 
-  // v2.6: revisión sin reformar/declarar en el dispositivo
   const condenaRev = esRev && haceLugar
     ? `"Hacer lugar a la acción de revisión interpuesta por [NOMBRE ACTOR] contra [DEMANDADA], condenando a [DEMANDADA] a abonar la suma de [TOTAL EN LETRAS] ([TOTAL EN PESOS]) en el plazo de diez (10) días de quedar firme el presente pronunciamiento (${artsCondena})."`
     : null;
@@ -804,7 +844,7 @@ Si rechaza: SIN CBU, intereses por mora, instrucciones pago honorarios.`;
 }
 
 // =============================================================================
-// ADHESIONES (texto fijo, sin cambios)
+// ADHESIONES (v2.6.2: doble salto entre "DIJO:" y el contenido del voto Weiss)
 // =============================================================================
 
 const WEISS_NOMBRE_COMPLETO = 'LA SEÑORA JUEZA DOCTORA MARÍA ALEJANDRA WEISS';
@@ -828,13 +868,16 @@ export function buildAdhesionSegunda(config, calculos, datos) {
 
   const adhJ2 = `A la misma cuestión planteada ${j2art} ${j2nombre}, por los mismos fundamentos, adhiere al voto precedente.`;
 
+  // CAMBIO v2.6.2: doble salto entre "DIJO:" y el contenido del voto. Esto
+  // hace que word.js trate el "DIJO:" como una línea separada y solo aplique
+  // bold a esa línea, dejando el cuerpo del voto en formato normal.
   let adhWeiss;
   if (!calculos) {
     adhWeiss = `A la misma cuestión planteada, ${WEISS_NOMBRE_COMPLETO}, adhiere a las consideraciones formuladas por ${primerCorto} y vota en igual sentido.`;
   } else if (datos?.denuncia_inconst_ley_23928) {
-    adhWeiss = `A LA SEGUNDA CUESTIÓN PLANTEADA ${WEISS_NOMBRE_COMPLETO}, DIJO: Sin perjuicio de compartir la solución adoptada en cuanto a la procedencia de la actualización del ingreso base mensual conforme al índice RIPTE, discrepo con el fundamento en que se sustenta. Mientras el voto mayoritario —siguiendo el criterio del Tribunal del Trabajo N.º 5— basa su decisión en la declaración de inconstitucionalidad del inciso 2 del artículo 12 de la Ley de Riesgos del Trabajo, considero, conforme a la postura que mantengo en el Tribunal del Trabajo N.º 4 que integro, que tanto la procedencia de la actualización como la invalidez de la norma citada derivan de la inconstitucionalidad sobreviniente del artículo 7 de la ley 23.928, conforme lo dispuesto por la ley 25.561, cuya tacha fue oportunamente articulada por la parte actora.\n\nAsí lo voto.`;
+    adhWeiss = `A LA SEGUNDA CUESTIÓN PLANTEADA ${WEISS_NOMBRE_COMPLETO}, DIJO:\n\nSin perjuicio de compartir la solución adoptada en cuanto a la procedencia de la actualización del ingreso base mensual conforme al índice RIPTE, discrepo con el fundamento en que se sustenta. Mientras el voto mayoritario —siguiendo el criterio del Tribunal del Trabajo N.º 5— basa su decisión en la declaración de inconstitucionalidad del inciso 2 del artículo 12 de la Ley de Riesgos del Trabajo, considero, conforme a la postura que mantengo en el Tribunal del Trabajo N.º 4 que integro, que tanto la procedencia de la actualización como la invalidez de la norma citada derivan de la inconstitucionalidad sobreviniente del artículo 7 de la ley 23.928, conforme lo dispuesto por la ley 25.561, cuya tacha fue oportunamente articulada por la parte actora.\n\nAsí lo voto.`;
   } else {
-    adhWeiss = `A LA SEGUNDA CUESTIÓN PLANTEADA ${WEISS_NOMBRE_COMPLETO} DIJO: Habiendo en el presente quedado conformada la mayoría con los votos de los doctores ${config.juez1.nombre} y ${config.juez2.nombre}, adhiero al voto emitido en primer término, dejando a salvo que conforme criterio del Tribunal de Trabajo N° 4 departamental que integro, conforme Exp. N° 20.463 causa "NIEVA", sent. del 13/8/2025; no habiendo solicitado el actor método de actualización específico, debió aplicarse al valor del ingreso medio la tasa activa cartera general nominal anual vencida a treinta días que fija el Banco de la Nación Argentina.\n\nAsí lo voto.`;
+    adhWeiss = `A LA SEGUNDA CUESTIÓN PLANTEADA ${WEISS_NOMBRE_COMPLETO} DIJO:\n\nHabiendo en el presente quedado conformada la mayoría con los votos de los doctores ${config.juez1.nombre} y ${config.juez2.nombre}, adhiero al voto emitido en primer término, dejando a salvo que conforme criterio del Tribunal de Trabajo N° 4 departamental que integro, conforme Exp. N° 20.463 causa "NIEVA", sent. del 13/8/2025; no habiendo solicitado el actor método de actualización específico, debió aplicarse al valor del ingreso medio la tasa activa cartera general nominal anual vencida a treinta días que fija el Banco de la Nación Argentina.\n\nAsí lo voto.`;
   }
 
   const cierreAcuerdo = 'Con lo que terminó el Acuerdo firmando los Señores Jueces por ante mí que doy fe.';
@@ -848,22 +891,22 @@ export function detectarVarianteWeiss(calculos, datos) {
   return 2;
 }
 
+// =============================================================================
+// ENCABEZADO OFICIAL DE LA SENTENCIA (v2.6.2: sin asteriscos)
+// =============================================================================
+
 export function buildEncabezadoSentencia(varianteWeiss) {
+  // CAMBIO v2.6.2: quitar los ** alrededor de "SENTENCIA". Quedaban literales
+  // porque word.js no convierte markdown a bold. Si se quiere bold, se aplica
+  // en el .docx final manualmente (o se ajusta word.js en otra iteración).
   const formula = varianteWeiss === 3 ? 'por unanimidad' : 'por mayoría';
-  return `**SENTENCIA**
+  return `SENTENCIA
 
 AUTOS Y VISTOS: CONSIDERANDO: Lo decidido en el Acuerdo que antecede y los fundamentos que lo sustentan, el Tribunal ${formula} RESUELVE:`;
 }
 
 // =============================================================================
-// CIERRE — TRANSCRIPCIÓN ART. 54 LEY 14.967 (texto LITERAL — bajo pena de nulidad)
-// =============================================================================
-// USO en NewSentence.jsx, después del dispositivo:
-//     import { buildCierreArt54 } from './sentenciaPrompts'
-//     ...
-//     fullSentence += dispositivo + '\n\n'
-//     fullSentence += buildCierreArt54() + '\n\n'   // ← AGREGAR ESTA LÍNEA
-//     setSentenceText(fullSentence)
+// CIERRE — TRANSCRIPCIÓN ART. 54 LEY 14.967 (sin cambios)
 // =============================================================================
 
 export function buildCierreArt54() {
