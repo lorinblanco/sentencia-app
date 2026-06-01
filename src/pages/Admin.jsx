@@ -90,7 +90,7 @@ export default function Admin({ profile }) {
 
   const TAB = [
     { id: 'users', label: '👥 Usuarios' },
-    { id: 'templates', label: '📋 Plantillas' },
+    // { id: 'templates', label: '📋 Plantillas' },
     { id: 'settings', label: '⚙ Ajustes' },
   ]
 
