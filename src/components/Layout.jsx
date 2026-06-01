@@ -58,7 +58,7 @@ export default function Layout() {
                 <p className="px-3 text-xs font-semibold text-gray-400 uppercase tracking-wider">Administración</p>
               </div>
               <NavItem to="/admin/usuarios" icon="👥" label="Usuarios" />
-              <NavItem to="/admin/plantillas" icon="📄" label="Plantillas" />
+              {/* <NavItem to="/admin/plantillas" icon="📄" label="Plantillas" /> */}
               <NavItem to="/admin/configuracion" icon="🔧" label="Configuración" />
             </>
           )}
