@@ -41,8 +41,9 @@ Mejor una sentencia con marcadores visibles que con datos inventados.
 PROHIBIDAS estas frases (genera el LLM cuando no encuentra un dato y sigue):
 "si bien no surge / no consta / no figura...", "del JSON extraído...", "de las constancias se desprende que...", "puede inferirse / cabe colegir / se entiende que...", "presumiblemente...", "habría dictaminado / manifestado...", "según las constancias obrantes...".
 
-ADEMÁS prohibida (muletilla automática no querida por el tribunal):
-"no habiendo la demandada producido prueba técnica que desvirtúe..." y variantes. Si el juez quiere ese argumento, lo agrega manualmente.
+ADEMÁS prohibidas (muletillas automáticas no queridas por el tribunal):
+"no habiendo la demandada producido prueba técnica que desvirtúe..." y variantes.
+"la demandada no produjo prueba técnica/pericial que acredite la preexistencia... ni su desvinculación con el evento dañoso" y CUALQUIER variante que aluda a falta de prueba técnica o pericial sobre preexistencias. NUNCA, en ningún caso, en ninguna sección. Si el juez quiere alguno de esos argumentos, lo agrega manualmente.
 
 Dato concreto AUSENTE en TODAS las fuentes → opciones:
 (a) Si es ESTRUCTURAL (nombre perito, fecha dictamen, N° expediente SRT): escribí literal "[FALTA: descripción]".
@@ -160,8 +161,7 @@ function huboImpugnacionReal(datos) {
   });
 }
 
-const REGLA_DATOS = `Datos exactos, CONCISO. Dato estructural ausente en todas las fuentes → "[FALTA: descripción]". Prohibidas: "si bien no surge...", "se desprende que...", "puede inferirse...", "presumiblemente...", "no habiendo producido prueba técnica que desvirtúe...". NUNCA atribuyas al perito el % reclamado. NUNCA inventes perito psi. NUNCA confundas contestación con impugnación.
-
+const REGLA_DATOS = `Datos exactos, CONCISO. Dato estructural ausente en todas las fuentes → "[FALTA: descripción]". Prohibidas: "si bien no surge...", "se desprende que...", "puede inferirse...", "presumiblemente...", "no habiendo producido prueba técnica que desvirtúe...", "no produjo prueba técnica que acredite la preexistencia... ni su desvinculación con el evento dañoso" (y toda variante sobre falta de prueba técnica/pericial de preexistencias). NUNCA atribuyas al perito el % reclamado. NUNCA inventes perito psi. NUNCA confundas contestación con impugnación.
 `;
 
 function bloqueValoresPrecalculados(calculos, config, datos) {
@@ -534,7 +534,8 @@ NO hubo impugnación posterior al dictamen. NO redactes bloque de impugnaciones.
   const bloquePreex = hayPreexistencias ? `
 
 ## 4. PREEXISTENCIAS
-La demandada denunció preexistencias. Analizá BREVE: ¿misma región? ¿prueba específica? Si solo invocó sin acreditar coincidencia anatómica → no se deducen.
+La demandada denunció preexistencias. Analizá BREVE si corresponde deducirlas: ¿coinciden anatómicamente con la región dañada en autos? ¿están reconocidas en dictamen/expediente anterior? Si solo las invocó sin coincidencia anatómica acreditada → no corresponde deducción.
+PROHIBIDO ABSOLUTO: NUNCA escribas que la demandada "no produjo/no aportó prueba técnica ni pericial que acredite la preexistencia" ni que "no acreditó su desvinculación con el evento dañoso", ni ninguna variante que aluda a falta de prueba técnica/pericial sobre la preexistencia. Si no hay preexistencia acreditada, concluí directamente que no corresponde deducción, sin mencionar carga ni falta de prueba técnica.
 ` : `
 
 ## 4. PREEXISTENCIAS
@@ -697,7 +698,7 @@ Voto SEGUNDA CUESTIÓN del primero. SIN encabezado ni adhesiones.
 # ESTRUCTURA
 
 ## 1. SÍNTESIS
-"De acuerdo a los hechos acreditados en la cuestión que antecede se probó que la parte actora como consecuencia de ${terminoHecho} ${esEnf ? 'padecida' : esRev ? 'denunciado' : 'sufrido'} presenta secuelas ${termSec}s que la incapacitan en un [% = ${calculos?.porcentaje || ''}%] de la t.o. Asimismo quedó acreditado que su edad al momento de ${terminoFecha} era de [edad] años y que el IBM bruto AFIP asciende a la suma de [IBM BRUTO]."
+"De acuerdo a los hechos acreditados en la cuestión que antecede se probó que la parte actora como consecuencia de ${terminoHecho} ${esEnf ? 'padecida' : esRev ? 'denunciado' : 'sufrido'} presenta secuelas ${termSec}s que la incapacitan en un [% = ${calculos?.porcentaje || ''}%] de la t.o. Asimismo quedó acreditado que su edad al momento de ${terminoFecha} era de [edad] años y que el IBM asciende a la suma de [IBM BRUTO]."
 
 ## 2. HIPÓTESIS (a) — BNA
 "Finalmente correspondería calcular el interés equivalente al promedio de la tasa activa cartera general nominal anual vencida a treinta (30) días del Banco de la Nación Argentina previsto en el inc. 2 del art. 11 de la ley 27.348 que modifica el art. 12 LRT. Dicho interés es de [INTERESES BNA] al que sumándole el ibm de [IBM BRUTO], se arriba al ibm con intereses de [IBM CON INTERESES]."
