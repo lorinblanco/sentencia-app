@@ -507,14 +507,16 @@ export default function NewSentence({ profile, session }) {
     }
   }
 
-  function buildEncabezado(data, config) {
-    const causa = data.causa_numero || '[N° CAUSA]'
-    const caratula = data.caratula || '[CARÁTULA]'
-    const { juez1, juez2, weiss } = config
-    const j1Sin = juez1.corto.replace(/^Dr[ao]\.\s*/, '')
-    const j2Sin = juez2.corto.replace(/^Dr[ao]\.\s*/, '')
-    return `En la ciudad de Quilmes, se reúnen en la Sala de Acuerdos los Señores Jueces que, para este acto, integran el Tribunal del Trabajo N.º 5 de esta ciudad, ${j1Sin}, ${j2Sin} y ${weiss.nombreCivil}, a efectos de dictar Sentencia en la causa Nº ${causa} caratulada "${caratula}", conforme el siguiente orden de votación: ${juez1.nombre} – ${juez2.nombre} – ${weiss.nombre}.`
-  }
+ function buildEncabezado(data, config) {
+  const causa = data.causa_numero || '[N° CAUSA]'
+  const caratula = data.caratula || '[CARÁTULA]'
+  const { juez1, juez2, weiss } = config
+  // Integración FIJA del tribunal (orden de INTEGRACIÓN, no de votación).
+  // Presidencia anual: Dr. Stolarczyk → siempre se nombra primero.
+  // No depende del orden de votación de cada sentencia.
+  const integracion = 'Dres. Mario Daniel Stolarczyk, Andrea Marcela Zacarías y María Alejandra Weiss'
+  return `En la ciudad de Quilmes, se reúnen en la Sala de Acuerdos los Señores Jueces que, para este acto, integran el Tribunal del Trabajo N.º 5 de esta ciudad, ${integracion}, a efectos de dictar Sentencia en la causa Nº ${causa} caratulada "${caratula}", conforme el siguiente orden de votación: ${juez1.nombre} – ${juez2.nombre} – ${weiss.nombre}.`
+}
 
   async function downloadWord() {
     if (!sentenceText) return
